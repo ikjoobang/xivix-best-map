@@ -661,9 +661,31 @@ app.get('/', (c) => {
       
       <div class="analysis-card">
         <p class="text-sm text-gray-600 dark:text-gray-400 mb-3">
-          ■ 업종을 선택하면 해당 업종의 <strong>경쟁 현황을 분석</strong>합니다. 
+          ■ 업종을 선택하거나 직접 입력하면 해당 업종의 <strong>경쟁 현황을 분석</strong>합니다. 
           "업종 추천받기"를 누르면 <strong>AI가 적합한 업종을 추천</strong>합니다.
         </p>
+        
+        <!-- 업종 검색 입력창 -->
+        <div class="mb-4">
+          <label class="block text-sm font-medium mb-2 dark:text-gray-300">
+            <i class="fas fa-search mr-1"></i> 업종 직접 입력
+          </label>
+          <div class="flex gap-2">
+            <input type="text" id="categorySearchInput" 
+              placeholder="예: 카페, 미용실, 편의점, 치킨집, 네일샵..."
+              class="flex-1 px-4 py-3 rounded-lg border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white focus:ring-2 focus:ring-green-500 focus:border-transparent"
+              oninput="filterCategories(this.value)"
+              onkeypress="if(event.key==='Enter') setCustomCategory()">
+            <button onclick="setCustomCategory()" 
+              class="px-6 py-3 btn-primary rounded-lg">
+              <i class="fas fa-check"></i> 선택
+            </button>
+          </div>
+          <!-- 자동완성 결과 -->
+          <div id="categoryAutocomplete" class="hidden mt-2 p-2 bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-lg max-h-48 overflow-y-auto shadow-lg"></div>
+        </div>
+
+        <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">또는 아래에서 대분류 선택:</p>
         
         <div class="flex flex-wrap gap-2 mb-4">
           <span class="category-badge bg-red-100 text-red-800" data-code="Q" onclick="selectCategory(this)">
@@ -893,6 +915,262 @@ app.get('/', (c) => {
     let selectedCategoryName = '전체';
     let selectedRadius = 500;
     let lastAnalysisResult = null;
+    let customCategoryInput = '';
+
+    // 업종 목록 (소상공인 상권정보 기준 + 일반적인 업종명)
+    const categoryList = [
+      // 음식점 (Q)
+      { name: '한식', code: 'Q', parent: '음식점' },
+      { name: '중식', code: 'Q', parent: '음식점' },
+      { name: '일식', code: 'Q', parent: '음식점' },
+      { name: '양식', code: 'Q', parent: '음식점' },
+      { name: '치킨집', code: 'Q', parent: '음식점' },
+      { name: '피자집', code: 'Q', parent: '음식점' },
+      { name: '햄버거', code: 'Q', parent: '음식점' },
+      { name: '분식', code: 'Q', parent: '음식점' },
+      { name: '카페', code: 'Q', parent: '음식점' },
+      { name: '커피숍', code: 'Q', parent: '음식점' },
+      { name: '베이커리', code: 'Q', parent: '음식점' },
+      { name: '제과점', code: 'Q', parent: '음식점' },
+      { name: '호프집', code: 'Q', parent: '음식점' },
+      { name: '술집', code: 'Q', parent: '음식점' },
+      { name: '포차', code: 'Q', parent: '음식점' },
+      { name: '고깃집', code: 'Q', parent: '음식점' },
+      { name: '삼겹살', code: 'Q', parent: '음식점' },
+      { name: '곱창', code: 'Q', parent: '음식점' },
+      { name: '족발', code: 'Q', parent: '음식점' },
+      { name: '보쌈', code: 'Q', parent: '음식점' },
+      { name: '국밥', code: 'Q', parent: '음식점' },
+      { name: '냉면', code: 'Q', parent: '음식점' },
+      { name: '칼국수', code: 'Q', parent: '음식점' },
+      { name: '떡볶이', code: 'Q', parent: '음식점' },
+      { name: '김밥', code: 'Q', parent: '음식점' },
+      { name: '라면', code: 'Q', parent: '음식점' },
+      { name: '우동', code: 'Q', parent: '음식점' },
+      { name: '초밥', code: 'Q', parent: '음식점' },
+      { name: '회', code: 'Q', parent: '음식점' },
+      { name: '돈까스', code: 'Q', parent: '음식점' },
+      { name: '파스타', code: 'Q', parent: '음식점' },
+      { name: '스테이크', code: 'Q', parent: '음식점' },
+      { name: '브런치', code: 'Q', parent: '음식점' },
+      { name: '샐러드', code: 'Q', parent: '음식점' },
+      { name: '샌드위치', code: 'Q', parent: '음식점' },
+      { name: '도시락', code: 'Q', parent: '음식점' },
+      { name: '배달음식', code: 'Q', parent: '음식점' },
+      { name: '디저트', code: 'Q', parent: '음식점' },
+      { name: '아이스크림', code: 'Q', parent: '음식점' },
+      { name: '빵집', code: 'Q', parent: '음식점' },
+      { name: '와플', code: 'Q', parent: '음식점' },
+      { name: '타코야끼', code: 'Q', parent: '음식점' },
+      { name: '밀크티', code: 'Q', parent: '음식점' },
+      { name: '버블티', code: 'Q', parent: '음식점' },
+      { name: '주스', code: 'Q', parent: '음식점' },
+      
+      // 소매 (D)
+      { name: '편의점', code: 'D', parent: '소매' },
+      { name: '슈퍼마켓', code: 'D', parent: '소매' },
+      { name: '마트', code: 'D', parent: '소매' },
+      { name: '과일가게', code: 'D', parent: '소매' },
+      { name: '정육점', code: 'D', parent: '소매' },
+      { name: '반찬가게', code: 'D', parent: '소매' },
+      { name: '꽃집', code: 'D', parent: '소매' },
+      { name: '문구점', code: 'D', parent: '소매' },
+      { name: '서점', code: 'D', parent: '소매' },
+      { name: '의류', code: 'D', parent: '소매' },
+      { name: '옷가게', code: 'D', parent: '소매' },
+      { name: '신발가게', code: 'D', parent: '소매' },
+      { name: '가방', code: 'D', parent: '소매' },
+      { name: '악세사리', code: 'D', parent: '소매' },
+      { name: '화장품', code: 'D', parent: '소매' },
+      { name: '드럭스토어', code: 'D', parent: '소매' },
+      { name: '약국', code: 'D', parent: '소매' },
+      { name: '안경점', code: 'D', parent: '소매' },
+      { name: '휴대폰', code: 'D', parent: '소매' },
+      { name: '전자제품', code: 'D', parent: '소매' },
+      { name: '컴퓨터', code: 'D', parent: '소매' },
+      { name: '철물점', code: 'D', parent: '소매' },
+      { name: '인테리어', code: 'D', parent: '소매' },
+      { name: '가구', code: 'D', parent: '소매' },
+      { name: '애견용품', code: 'D', parent: '소매' },
+      { name: '펫샵', code: 'D', parent: '소매' },
+      { name: '유아용품', code: 'D', parent: '소매' },
+      { name: '장난감', code: 'D', parent: '소매' },
+      { name: '주류', code: 'D', parent: '소매' },
+      { name: '담배', code: 'D', parent: '소매' },
+      
+      // 생활서비스 (F)
+      { name: '미용실', code: 'F', parent: '생활서비스' },
+      { name: '헤어샵', code: 'F', parent: '생활서비스' },
+      { name: '이발소', code: 'F', parent: '생활서비스' },
+      { name: '네일샵', code: 'F', parent: '생활서비스' },
+      { name: '속눈썹', code: 'F', parent: '생활서비스' },
+      { name: '피부관리', code: 'F', parent: '생활서비스' },
+      { name: '왁싱', code: 'F', parent: '생활서비스' },
+      { name: '세탁소', code: 'F', parent: '생활서비스' },
+      { name: '빨래방', code: 'F', parent: '생활서비스' },
+      { name: '수선', code: 'F', parent: '생활서비스' },
+      { name: '사진관', code: 'F', parent: '생활서비스' },
+      { name: '스튜디오', code: 'F', parent: '생활서비스' },
+      { name: '인쇄소', code: 'F', parent: '생활서비스' },
+      { name: '복사', code: 'F', parent: '생활서비스' },
+      { name: '열쇠', code: 'F', parent: '생활서비스' },
+      { name: '자동차정비', code: 'F', parent: '생활서비스' },
+      { name: '세차장', code: 'F', parent: '생활서비스' },
+      { name: '주유소', code: 'F', parent: '생활서비스' },
+      { name: '이사', code: 'F', parent: '생활서비스' },
+      { name: '청소', code: 'F', parent: '생활서비스' },
+      { name: '에어컨', code: 'F', parent: '생활서비스' },
+      { name: '보일러', code: 'F', parent: '생활서비스' },
+      
+      // 스포츠/오락 (N)
+      { name: '헬스장', code: 'N', parent: '스포츠/오락' },
+      { name: '피트니스', code: 'N', parent: '스포츠/오락' },
+      { name: '필라테스', code: 'N', parent: '스포츠/오락' },
+      { name: '요가', code: 'N', parent: '스포츠/오락' },
+      { name: '골프연습장', code: 'N', parent: '스포츠/오락' },
+      { name: '스크린골프', code: 'N', parent: '스포츠/오락' },
+      { name: '볼링장', code: 'N', parent: '스포츠/오락' },
+      { name: '당구장', code: 'N', parent: '스포츠/오락' },
+      { name: '탁구장', code: 'N', parent: '스포츠/오락' },
+      { name: '테니스', code: 'N', parent: '스포츠/오락' },
+      { name: '배드민턴', code: 'N', parent: '스포츠/오락' },
+      { name: '수영장', code: 'N', parent: '스포츠/오락' },
+      { name: '태권도', code: 'N', parent: '스포츠/오락' },
+      { name: '복싱', code: 'N', parent: '스포츠/오락' },
+      { name: '주짓수', code: 'N', parent: '스포츠/오락' },
+      { name: 'PC방', code: 'N', parent: '스포츠/오락' },
+      { name: '노래방', code: 'N', parent: '스포츠/오락' },
+      { name: '코인노래방', code: 'N', parent: '스포츠/오락' },
+      { name: '만화방', code: 'N', parent: '스포츠/오락' },
+      { name: '보드게임', code: 'N', parent: '스포츠/오락' },
+      { name: '방탈출', code: 'N', parent: '스포츠/오락' },
+      { name: '오락실', code: 'N', parent: '스포츠/오락' },
+      { name: '키즈카페', code: 'N', parent: '스포츠/오락' },
+      
+      // 부동산 (L)
+      { name: '부동산', code: 'L', parent: '부동산' },
+      { name: '공인중개사', code: 'L', parent: '부동산' },
+      
+      // 학문/교육 (P)
+      { name: '학원', code: 'P', parent: '학문/교육' },
+      { name: '영어학원', code: 'P', parent: '학문/교육' },
+      { name: '수학학원', code: 'P', parent: '학문/교육' },
+      { name: '입시학원', code: 'P', parent: '학문/교육' },
+      { name: '피아노', code: 'P', parent: '학문/교육' },
+      { name: '미술학원', code: 'P', parent: '학문/교육' },
+      { name: '태권도', code: 'P', parent: '학문/교육' },
+      { name: '댄스학원', code: 'P', parent: '학문/교육' },
+      { name: '어린이집', code: 'P', parent: '학문/교육' },
+      { name: '유치원', code: 'P', parent: '학문/교육' },
+      { name: '독서실', code: 'P', parent: '학문/교육' },
+      { name: '스터디카페', code: 'P', parent: '학문/교육' },
+      { name: '코딩학원', code: 'P', parent: '학문/교육' },
+      
+      // 의료 (R)
+      { name: '병원', code: 'R', parent: '의료' },
+      { name: '의원', code: 'R', parent: '의료' },
+      { name: '치과', code: 'R', parent: '의료' },
+      { name: '한의원', code: 'R', parent: '의료' },
+      { name: '피부과', code: 'R', parent: '의료' },
+      { name: '내과', code: 'R', parent: '의료' },
+      { name: '정형외과', code: 'R', parent: '의료' },
+      { name: '안과', code: 'R', parent: '의료' },
+      { name: '이비인후과', code: 'R', parent: '의료' },
+      { name: '소아과', code: 'R', parent: '의료' },
+      { name: '산부인과', code: 'R', parent: '의료' },
+      { name: '정신과', code: 'R', parent: '의료' },
+      { name: '동물병원', code: 'R', parent: '의료' },
+      { name: '마사지', code: 'R', parent: '의료' },
+      { name: '스파', code: 'R', parent: '의료' },
+      { name: '찜질방', code: 'R', parent: '의료' },
+    ];
+
+    // ============================================
+    // Category Search Functions
+    // ============================================
+    function filterCategories(keyword) {
+      const autocompleteDiv = document.getElementById('categoryAutocomplete');
+      
+      if (!keyword || keyword.trim().length < 1) {
+        autocompleteDiv.classList.add('hidden');
+        return;
+      }
+      
+      const searchTerm = keyword.trim().toLowerCase();
+      const matches = categoryList.filter(cat => 
+        cat.name.toLowerCase().includes(searchTerm)
+      ).slice(0, 10);
+      
+      if (matches.length === 0) {
+        autocompleteDiv.innerHTML = \`
+          <div class="p-3 text-gray-500 dark:text-gray-400">
+            <p>"\${keyword}" 업종을 찾을 수 없습니다.</p>
+            <p class="text-sm mt-1">Enter 키를 누르면 직접 입력한 업종으로 분석합니다.</p>
+          </div>
+        \`;
+        autocompleteDiv.classList.remove('hidden');
+        return;
+      }
+      
+      autocompleteDiv.innerHTML = '';
+      matches.forEach(cat => {
+        const item = document.createElement('div');
+        item.className = 'p-3 hover:bg-gray-100 dark:hover:bg-gray-600 cursor-pointer rounded-lg transition flex justify-between items-center';
+        item.innerHTML = \`
+          <span class="font-medium dark:text-white">\${cat.name}</span>
+          <span class="text-xs px-2 py-1 rounded bg-gray-200 dark:bg-gray-500 text-gray-600 dark:text-gray-200">\${cat.parent}</span>
+        \`;
+        item.onclick = () => {
+          document.getElementById('categorySearchInput').value = cat.name;
+          selectedCategory = cat.code;
+          selectedCategoryName = cat.name;
+          customCategoryInput = cat.name;
+          
+          // 대분류 배지 선택 해제
+          document.querySelectorAll('.category-badge').forEach(b => b.classList.remove('selected'));
+          
+          // 선택 정보 표시
+          document.getElementById('selectedCategoryInfo').classList.remove('hidden');
+          document.getElementById('selectedCategoryName').textContent = \`\${cat.name} (\${cat.parent})\`;
+          
+          autocompleteDiv.classList.add('hidden');
+        };
+        autocompleteDiv.appendChild(item);
+      });
+      
+      autocompleteDiv.classList.remove('hidden');
+    }
+
+    function setCustomCategory() {
+      const input = document.getElementById('categorySearchInput').value.trim();
+      
+      if (!input) {
+        alert('업종명을 입력해주세요');
+        return;
+      }
+      
+      // 목록에서 찾기
+      const found = categoryList.find(cat => cat.name.toLowerCase() === input.toLowerCase());
+      
+      if (found) {
+        selectedCategory = found.code;
+        selectedCategoryName = found.name;
+        customCategoryInput = found.name;
+        document.getElementById('selectedCategoryName').textContent = \`\${found.name} (\${found.parent})\`;
+      } else {
+        // 사용자 정의 업종
+        selectedCategory = '';  // 전체로 검색하되 AI에게 업종명 전달
+        selectedCategoryName = input;
+        customCategoryInput = input;
+        document.getElementById('selectedCategoryName').textContent = \`\${input} (사용자 입력)\`;
+      }
+      
+      // 대분류 배지 선택 해제
+      document.querySelectorAll('.category-badge').forEach(b => b.classList.remove('selected'));
+      
+      document.getElementById('selectedCategoryInfo').classList.remove('hidden');
+      document.getElementById('categoryAutocomplete').classList.add('hidden');
+    }
 
     // ============================================
     // Initialize Map
@@ -931,8 +1209,11 @@ app.get('/', (c) => {
       // 업종 초기화
       selectedCategory = '';
       selectedCategoryName = '전체';
+      customCategoryInput = '';
       document.querySelectorAll('.category-badge').forEach(b => b.classList.remove('selected'));
       document.getElementById('selectedCategoryInfo').classList.add('hidden');
+      document.getElementById('categorySearchInput').value = '';
+      document.getElementById('categoryAutocomplete').classList.add('hidden');
       
       // 반경 초기화
       selectedRadius = 500;
