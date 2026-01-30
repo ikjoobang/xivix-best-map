@@ -11,6 +11,8 @@ type Bindings = {
   NAVER_CLIENT_ID: string
   NAVER_CLIENT_SECRET: string
   SEMAS_API_KEY: string
+  KAKAO_REST_API_KEY: string
+  KAKAO_JS_KEY: string
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -186,129 +188,149 @@ app.get('/api/semas/upjong', async (c) => {
   }
 })
 
-// 소상공인 - 반경 내 상가 조회 (네이버 지역검색 API 대체 사용)
+// 소상공인 상권정보 API (공식 sdsc2 엔드포인트) - 반경 내 상가 조회
 app.get('/api/semas/radius', async (c) => {
   const cx = c.req.query('cx')
   const cy = c.req.query('cy')
   const radius = c.req.query('radius') || '500'
   const category = c.req.query('category') || ''
-  const address = c.req.query('address') || ''  // 지역명 추가
   
   if (!cx || !cy) {
     return c.json({ error: 'cx and cy are required' }, 400)
   }
   
   try {
-    // 지역명 추출 (주소에서 동/읍/면 추출)
-    let locationKeyword = '';
-    if (address) {
-      // "부산 기장군 정관읍 매학리" -> "정관" 또는 "정관읍"
-      const match = address.match(/([가-힣]+(?:동|읍|면|리|구|시|군))/g);
-      if (match && match.length >= 2) {
-        // 구/군 + 동/읍/면 조합
-        locationKeyword = match.slice(-2).join(' ').replace(/[동읍면리]$/, '');
-      } else if (match) {
-        locationKeyword = match[match.length - 1].replace(/[동읍면리]$/, '');
-      }
+    // 소상공인 상권정보 API 호출 (새 엔드포인트: sdsc2)
+    const apiUrl = `https://apis.data.go.kr/B553077/api/open/sdsc2/storeListInRadius?serviceKey=${c.env.SEMAS_API_KEY}&radius=${radius}&cx=${cx}&cy=${cy}&type=json&numOfRows=1000`;
+    
+    console.log('SEMAS API URL:', apiUrl.replace(c.env.SEMAS_API_KEY, 'HIDDEN'));
+    
+    const response = await fetch(apiUrl);
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('SEMAS API Error:', errorText);
+      return c.json({ error: `소상공인 API 오류: ${response.status}` }, 500);
     }
     
-    // 검색할 업종 카테고리 목록
-    const baseCategories = ['음식점', '카페', '편의점', '미용실', '병원', '약국', '학원', '헬스장', '부동산', '마트', '세탁소', '네일샵', '피부관리'];
-    const allItems: any[] = [];
+    const data = await response.json();
     
-    // 1. 선택한 업종을 먼저 집중 검색 (display=50)
-    if (category) {
-      const searchQuery = locationKeyword ? `${locationKeyword} ${category}` : category;
-      console.log('Category Search Query:', searchQuery);
+    if (data.header?.resultCode !== '00') {
+      return c.json({ error: `API 응답 오류: ${data.header?.resultMsg}` }, 500);
+    }
+    
+    const items = data.body?.items || [];
+    const totalCount = data.body?.totalCount || 0;
+    
+    // 업종별 분류를 위한 매핑
+    const categoryMapping: Record<string, string> = {
+      'S207': '이용·미용',
+      'I201': '한식',
+      'I202': '중식',
+      'I203': '일식',
+      'I204': '양식',
+      'I205': '제과/패스트푸드',
+      'I206': '치킨/피자',
+      'I210': '기타 간이음식',
+      'I211': '주점',
+      'I212': '비알코올(카페)',
+      'G204': '종합소매',
+      'G205': '음·식료품 소매',
+      'G215': '의약·화장품 소매',
+      'Q101': '병원',
+      'Q102': '의원',
+      'P101': '학교',
+      'P105': '일반 교육',
+      'P106': '기타 교육',
+      'L102': '부동산 서비스',
+      'R103': '스포츠 서비스',
+    };
+    
+    // 선택한 업종에 해당하는 중분류 코드
+    const categoryToCode: Record<string, string[]> = {
+      '미용실': ['S207'],
+      '음식점': ['I201', 'I202', 'I203', 'I204', 'I205', 'I206', 'I210'],
+      '카페': ['I212'],
+      '편의점': ['G204', 'G205'],
+      '병원': ['Q101', 'Q102'],
+      '약국': ['G215'],
+      '학원': ['P105', 'P106'],
+      '헬스장': ['R103'],
+      '부동산': ['L102'],
+    };
+    
+    // 동종 업종 필터링
+    const targetCodes = categoryToCode[category] || [];
+    let targetCategoryCount = 0;
+    const competitorList: any[] = [];
+    
+    // 업종별 카운트
+    const categoryCount: Record<string, { count: number; items: any[] }> = {};
+    
+    items.forEach((item: any) => {
+      const mclsCd = item.indsMclsCd || '';
+      const mclsNm = item.indsMclsNm || categoryMapping[mclsCd] || '기타';
       
-      const response = await fetch(
-        `https://openapi.naver.com/v1/search/local.json?query=${encodeURIComponent(searchQuery)}&display=50&sort=comment`,
-        {
-          headers: {
-            'X-Naver-Client-Id': c.env.NAVER_CLIENT_ID,
-            'X-Naver-Client-Secret': c.env.NAVER_CLIENT_SECRET
-          }
-        }
-      );
+      // 카테고리 집계
+      if (!categoryCount[mclsNm]) {
+        categoryCount[mclsNm] = { count: 0, items: [] };
+      }
+      categoryCount[mclsNm].count++;
+      categoryCount[mclsNm].items.push(item);
       
-      if (response.ok) {
-        const data = await response.json();
-        const items = data.items || [];
-        items.forEach((item: any) => {
-          allItems.push({
-            bizesNm: item.title?.replace(/<[^>]*>/g, '') || '',
-            indsLclsCd: getCategoryCode(item.category, category),
-            indsLclsNm: item.category || category,
-            indsMclsNm: item.category || '',
-            rdnmAdr: item.roadAddress || item.address || '',
-            lnoAdr: item.address || '',
-            lon: item.mapx ? parseInt(item.mapx) / 10000000 : parseFloat(cx),
-            lat: item.mapy ? parseInt(item.mapy) / 10000000 : parseFloat(cy),
-            isTargetCategory: true  // 동종 업종 표시
-          });
+      // 동종 업종 체크
+      if (targetCodes.length > 0 && targetCodes.includes(mclsCd)) {
+        targetCategoryCount++;
+        competitorList.push({
+          name: item.bizesNm,
+          branch: item.brchNm || '',
+          category: item.indsSclsNm || mclsNm,
+          address: item.rdnmAdr || item.lnoAdr,
+          lon: item.lon,
+          lat: item.lat
         });
       }
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
+    });
     
-    // 2. 기타 업종들 검색 (전체 상권 파악용)
-    for (const cat of baseCategories) {
-      if (category && cat === category) continue; // 이미 검색한 카테고리 스킵
-      
-      const searchQuery = locationKeyword ? `${locationKeyword} ${cat}` : cat;
-      
-      const response = await fetch(
-        `https://openapi.naver.com/v1/search/local.json?query=${encodeURIComponent(searchQuery)}&display=20&sort=comment`,
-        {
-          headers: {
-            'X-Naver-Client-Id': c.env.NAVER_CLIENT_ID,
-            'X-Naver-Client-Secret': c.env.NAVER_CLIENT_SECRET
-          }
-        }
-      );
-      
-      if (response.ok) {
-        const data = await response.json();
-        const items = data.items || [];
-        items.forEach((item: any) => {
-          allItems.push({
-            bizesNm: item.title?.replace(/<[^>]*>/g, '') || '',
-            indsLclsCd: getCategoryCode(item.category, cat),
-            indsLclsNm: item.category || cat,
-            indsMclsNm: item.category || '',
-            rdnmAdr: item.roadAddress || item.address || '',
-            lnoAdr: item.address || '',
-            lon: item.mapx ? parseInt(item.mapx) / 10000000 : parseFloat(cx),
-            lat: item.mapy ? parseInt(item.mapy) / 10000000 : parseFloat(cy),
-            isTargetCategory: false
+    // 동종 업종이 없으면 상호명으로 추가 검색
+    if (targetCategoryCount === 0 && category) {
+      items.forEach((item: any) => {
+        const bizName = (item.bizesNm || '').toLowerCase();
+        const categoryLower = category.toLowerCase();
+        
+        if (
+          (categoryLower.includes('미용') && (bizName.includes('미용') || bizName.includes('헤어') || bizName.includes('hair'))) ||
+          (categoryLower.includes('카페') && (bizName.includes('카페') || bizName.includes('cafe') || bizName.includes('커피')))
+        ) {
+          targetCategoryCount++;
+          competitorList.push({
+            name: item.bizesNm,
+            branch: item.brchNm || '',
+            category: item.indsSclsNm || item.indsMclsNm,
+            address: item.rdnmAdr || item.lnoAdr,
+            lon: item.lon,
+            lat: item.lat
           });
-        });
-      }
-      
-      await new Promise(resolve => setTimeout(resolve, 50));
+        }
+      });
     }
-    
-    // 중복 제거
-    const uniqueItems = allItems.filter((item, index, self) => 
-      index === self.findIndex(t => t.bizesNm === item.bizesNm && t.rdnmAdr === item.rdnmAdr)
-    );
-    
-    // 동종 업종 수 계산
-    const targetCategoryCount = uniqueItems.filter(item => item.isTargetCategory).length;
     
     return c.json({
       body: {
-        items: uniqueItems,
-        totalCount: uniqueItems.length,
+        items,
+        totalCount,
         targetCategoryCount,
-        searchLocation: locationKeyword,
+        competitorList,
+        categoryCount,
+        dataDate: data.header?.stdrYm || '',
         searchCategory: category
       },
-      dataSource: 'naver_local_search',
-      message: `네이버 지역검색 API 기반 데이터입니다. 검색 지역: ${locationKeyword || '전국'}, 동종 업종(${category || '전체'}): ${targetCategoryCount}개`
+      dataSource: 'semas_official_api',
+      message: `소상공인시장진흥공단 상권정보 API (데이터 기준: ${data.header?.stdrYm || 'N/A'}). 반경 ${radius}m 내 총 ${totalCount}개 업소, 동종 업종(${category || '전체'}): ${targetCategoryCount}개`
     });
   } catch (error: any) {
-    return c.json({ error: error.message }, 500)
+    console.error('SEMAS API Error:', error);
+    return c.json({ error: error.message }, 500);
   }
 })
 
@@ -1716,11 +1738,10 @@ app.get('/', (c) => {
     }
 
     async function fetchStoreData() {
-      // 주소와 선택한 업종을 함께 전달
-      const addressEncoded = encodeURIComponent(selectedAddress || '');
+      // 좌표와 반경, 업종 전달 (소상공인 공식 API 사용)
       const categoryEncoded = encodeURIComponent(selectedCategoryName || '');
       
-      let url = \`/api/semas/radius?cx=\${selectedLon}&cy=\${selectedLat}&radius=\${selectedRadius}&address=\${addressEncoded}&category=\${categoryEncoded}\`;
+      let url = \`/api/semas/radius?cx=\${selectedLon}&cy=\${selectedLat}&radius=\${selectedRadius}&category=\${categoryEncoded}\`;
       
       console.log('Fetching store data with URL:', url);
       
@@ -1732,6 +1753,9 @@ app.get('/', (c) => {
       }
       
       console.log('Store data received:', data);
+      console.log('Data source:', data.dataSource);
+      console.log('Total count:', data.body?.totalCount);
+      console.log('Target category count:', data.body?.targetCategoryCount);
       return data;
     }
 
@@ -1740,40 +1764,40 @@ app.get('/', (c) => {
       const totalCount = data.body?.totalCount || 0;
       // 서버에서 계산한 동종 업종 수 사용
       const targetCategoryCount = data.body?.targetCategoryCount || 0;
-      const searchLocation = data.body?.searchLocation || '';
+      const dataDate = data.body?.dataDate || '';
+      const dataSource = data.dataSource || '';
       
-      const categoryCount = {};
-      const categoryNames = {
-        'Q': '음식점', 'D': '소매', 'F': '생활서비스', 
-        'N': '스포츠/오락', 'L': '부동산', 'P': '학문/교육', 
-        'R': '의료', 'O': '숙박', 'S': '수리/개인', 'E': '제조'
-      };
+      // 서버에서 받은 업종별 카운트 사용 (소상공인 API)
+      const serverCategoryCount = data.body?.categoryCount || {};
       
-      // 동종 업종 업체 목록 수집
-      const competitorList = [];
+      // 업종별 카운트 (서버 데이터 우선, 없으면 클라이언트에서 집계)
+      let categoryCount = {};
       
-      items.forEach(item => {
-        const code = item.indsLclsCd || 'Z';
-        const name = categoryNames[code] || item.indsLclsNm || '기타';
-        if (!categoryCount[name]) {
-          categoryCount[name] = { count: 0, items: [] };
-        }
-        categoryCount[name].count++;
-        categoryCount[name].items.push(item);
+      if (Object.keys(serverCategoryCount).length > 0) {
+        categoryCount = serverCategoryCount;
+      } else {
+        const categoryNames = {
+          'I2': '음식', 'G2': '소매', 'S2': '수리/개인', 
+          'R1': '예술/스포츠', 'L1': '부동산', 'P1': '교육', 
+          'Q1': '보건의료', 'N1': '시설관리/임대', 'M1': '전문/과학', 'F1': '건설'
+        };
         
-        // 동종 업종이면 경쟁업체 목록에 추가
-        if (item.isTargetCategory) {
-          competitorList.push({
-            name: item.bizesNm,
-            address: item.rdnmAdr || item.lnoAdr,
-            category: item.indsLclsNm
-          });
-        }
-      });
+        items.forEach(item => {
+          const code = (item.indsLclsCd || '').substring(0, 2);
+          const name = item.indsMclsNm || categoryNames[code] || '기타';
+          if (!categoryCount[name]) {
+            categoryCount[name] = { count: 0, items: [] };
+          }
+          categoryCount[name].count++;
+          categoryCount[name].items.push(item);
+        });
+      }
       
-      // 서버에서 받은 동종 업종 수 사용 (더 정확함)
-      const sameCategoryCount = targetCategoryCount > 0 ? targetCategoryCount : 
-        (selectedCategory ? (categoryCount[selectedCategoryName]?.count || 0) : totalCount);
+      // 동종 업종 업체 목록 (서버에서 제공)
+      const competitorList = data.body?.competitorList || [];
+      
+      // 동종 업종 수
+      const sameCategoryCount = targetCategoryCount;
       
       const areaKm2 = Math.PI * Math.pow(selectedRadius / 1000, 2);
       const density = (totalCount / areaKm2).toFixed(1);
@@ -1817,7 +1841,8 @@ app.get('/', (c) => {
         categoryCount,
         items,
         competitorList,
-        searchLocation,
+        dataDate,
+        dataSource,
         address: selectedAddress,
         radius: selectedRadius,
         category: selectedCategoryName
@@ -1870,7 +1895,7 @@ app.get('/', (c) => {
 - **분석 반경**: \${result.radius}m (면적: 약 \${(Math.PI * Math.pow(result.radius/1000, 2)).toFixed(2)}km²)
 - **희망 창업 업종**: \${result.category}
 
-## 📊 상권 현황 데이터 (네이버 지역검색 API 기준)
+## 📊 상권 현황 데이터 (소상공인시장진흥공단 공식 API, 데이터 기준: \${result.dataDate || 'N/A'})
 - **전체 상가 수**: \${result.totalCount}개
 - **동종 업종(\${result.category}) 경쟁업체 수**: \${result.sameCategoryCount}개
 - **전체 상가 밀도**: \${result.density}개/km²
