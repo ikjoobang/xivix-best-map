@@ -397,6 +397,320 @@ app.get('/api/naver/local', async (c) => {
   }
 })
 
+// ============================================
+// 🔥 다중 API 통합 상권분석 (Multi-API Analysis)
+// ============================================
+app.get('/api/analysis/multi', async (c) => {
+  const cx = c.req.query('cx')  // 경도
+  const cy = c.req.query('cy')  // 위도
+  const radius = c.req.query('radius') || '1000'  // 반경(m)
+  const category = c.req.query('category') || '미용실'  // 업종
+  const address = c.req.query('address') || ''  // 주소 (지역명 추출용)
+  
+  if (!cx || !cy) {
+    return c.json({ error: 'cx(경도)와 cy(위도)는 필수입니다' }, 400)
+  }
+  
+  const radiusKm = parseInt(radius) / 1000  // km 단위로 변환
+  const results: any = {
+    meta: {
+      coordinates: { lon: parseFloat(cx), lat: parseFloat(cy) },
+      radius: parseInt(radius),
+      radiusKm,
+      category,
+      address,
+      analyzedAt: new Date().toISOString(),
+    },
+    sources: {},
+    summary: {},
+    competitors: [],
+    categoryBreakdown: {},
+  }
+  
+  // 지역명 추출 (주소에서)
+  const locationKeyword = address.split(' ').slice(0, 3).join(' ') || '해당 지역'
+  
+  // ===== 1. 카카오 로컬 API (좌표+반경 검색) =====
+  try {
+    const kakaoUrl = new URL('https://dapi.kakao.com/v2/local/search/keyword.json')
+    kakaoUrl.searchParams.set('query', category)
+    kakaoUrl.searchParams.set('x', cx)
+    kakaoUrl.searchParams.set('y', cy)
+    kakaoUrl.searchParams.set('radius', radius)
+    kakaoUrl.searchParams.set('size', '15')
+    kakaoUrl.searchParams.set('sort', 'distance')
+    
+    const kakaoResponse = await fetch(kakaoUrl.toString(), {
+      headers: { 'Authorization': `KakaoAK ${c.env.KAKAO_REST_API_KEY}` }
+    })
+    
+    if (kakaoResponse.ok) {
+      const kakaoData = await kakaoResponse.json()
+      const meta = kakaoData.meta || {}
+      const docs = kakaoData.documents || []
+      
+      results.sources.kakao = {
+        totalCount: meta.total_count || 0,
+        returnedCount: docs.length,
+        isAccurate: !meta.is_end,  // 더 많은 결과가 있는지
+        items: docs.map((d: any) => ({
+          name: d.place_name,
+          category: d.category_name,
+          address: d.road_address_name || d.address_name,
+          phone: d.phone,
+          distance: parseInt(d.distance) || 0,
+          lon: parseFloat(d.x),
+          lat: parseFloat(d.y),
+          placeUrl: d.place_url,
+        }))
+      }
+    }
+  } catch (error: any) {
+    console.error('Kakao API Error:', error.message)
+    results.sources.kakao = { error: error.message }
+  }
+  
+  // ===== 2. T-MAP POI API (반경 검색) =====
+  try {
+    const tmapUrl = new URL('https://apis.openapi.sk.com/tmap/pois/search/around')
+    tmapUrl.searchParams.set('version', '1')
+    tmapUrl.searchParams.set('centerLon', cx)
+    tmapUrl.searchParams.set('centerLat', cy)
+    tmapUrl.searchParams.set('categories', category)
+    tmapUrl.searchParams.set('radius', radiusKm.toString())
+    tmapUrl.searchParams.set('count', '20')
+    tmapUrl.searchParams.set('resCoordType', 'WGS84GEO')
+    
+    const tmapResponse = await fetch(tmapUrl.toString(), {
+      headers: { 'appKey': c.env.TMAP_API_KEY }
+    })
+    
+    if (tmapResponse.ok) {
+      const tmapData = await tmapResponse.json()
+      const poiInfo = tmapData.searchPoiInfo || {}
+      const pois = poiInfo.pois?.poi || []
+      
+      results.sources.tmap = {
+        totalCount: poiInfo.totalCount || 0,
+        returnedCount: pois.length,
+        items: pois.map((p: any) => ({
+          name: p.name,
+          address: p.roadName ? `${p.upperAddrName} ${p.middleAddrName} ${p.roadName} ${p.buildingNo1}` : 
+                   `${p.upperAddrName} ${p.middleAddrName} ${p.lowerAddrName}`,
+          phone: p.telNo,
+          distance: parseFloat(p.radius) * 1000,  // km to m
+          lon: parseFloat(p.frontLon),
+          lat: parseFloat(p.frontLat),
+        }))
+      }
+    }
+  } catch (error: any) {
+    console.error('T-MAP API Error:', error.message)
+    results.sources.tmap = { error: error.message }
+  }
+  
+  // ===== 3. 네이버 지역검색 API (키워드 검색) =====
+  try {
+    const naverQuery = `${locationKeyword} ${category}`
+    const naverUrl = `https://openapi.naver.com/v1/search/local.json?query=${encodeURIComponent(naverQuery)}&display=15&sort=comment`
+    
+    const naverResponse = await fetch(naverUrl, {
+      headers: {
+        'X-Naver-Client-Id': c.env.NAVER_CLIENT_ID,
+        'X-Naver-Client-Secret': c.env.NAVER_CLIENT_SECRET
+      }
+    })
+    
+    if (naverResponse.ok) {
+      const naverData = await naverResponse.json()
+      const items = naverData.items || []
+      
+      results.sources.naver = {
+        totalCount: naverData.total || 0,
+        returnedCount: items.length,
+        searchQuery: naverQuery,
+        items: items.map((item: any) => ({
+          name: item.title.replace(/<[^>]*>/g, ''),  // HTML 태그 제거
+          category: item.category,
+          address: item.roadAddress || item.address,
+          phone: item.telephone,
+          lon: item.mapx ? parseInt(item.mapx) / 10000000 : null,
+          lat: item.mapy ? parseInt(item.mapy) / 10000000 : null,
+        }))
+      }
+    }
+  } catch (error: any) {
+    console.error('Naver API Error:', error.message)
+    results.sources.naver = { error: error.message }
+  }
+  
+  // ===== 4. 소상공인 상권정보 API (공식 통계) =====
+  try {
+    const semasUrl = `https://apis.data.go.kr/B553077/api/open/sdsc2/storeListInRadius?serviceKey=${c.env.SEMAS_API_KEY}&radius=${radius}&cx=${cx}&cy=${cy}&type=json&numOfRows=1000`
+    
+    const semasResponse = await fetch(semasUrl)
+    
+    if (semasResponse.ok) {
+      const semasData = await semasResponse.json()
+      
+      if (semasData.header?.resultCode === '00') {
+        const items = semasData.body?.items || []
+        const totalCount = semasData.body?.totalCount || 0
+        const dataDate = semasData.header?.stdrYm || ''
+        
+        // 업종별 분류
+        const categoryCount: Record<string, number> = {}
+        const targetItems: any[] = []
+        
+        // 동종 업종 코드 매핑
+        const categoryCodeMap: Record<string, string[]> = {
+          '미용실': ['S207'],
+          '음식점': ['I201', 'I202', 'I203', 'I204', 'I205', 'I206', 'I210'],
+          '카페': ['I212'],
+          '편의점': ['G204', 'G205'],
+          '병원': ['Q101', 'Q102'],
+          '약국': ['G215'],
+          '학원': ['P105', 'P106'],
+          '헬스장': ['R103'],
+          '부동산': ['L102'],
+        }
+        
+        const targetCodes = categoryCodeMap[category] || []
+        
+        items.forEach((item: any) => {
+          const mclsCd = item.indsMclsCd || ''
+          const mclsNm = item.indsMclsNm || '기타'
+          
+          // 업종별 카운트
+          categoryCount[mclsNm] = (categoryCount[mclsNm] || 0) + 1
+          
+          // 동종 업종 필터
+          if (targetCodes.includes(mclsCd)) {
+            targetItems.push({
+              name: item.bizesNm,
+              category: item.indsSclsNm || mclsNm,
+              address: item.rdnmAdr || item.lnoAdr,
+              lon: parseFloat(item.lon),
+              lat: parseFloat(item.lat),
+              source: 'semas'
+            })
+          }
+        })
+        
+        results.sources.semas = {
+          totalCount,
+          targetCategoryCount: targetItems.length,
+          dataDate,
+          dataSource: '소상공인시장진흥공단 공식 통계',
+          categoryBreakdown: categoryCount,
+          items: targetItems.slice(0, 30)  // 상위 30개만
+        }
+        
+        // 전체 업종 분포 저장
+        results.categoryBreakdown = categoryCount
+      }
+    }
+  } catch (error: any) {
+    console.error('SEMAS API Error:', error.message)
+    results.sources.semas = { error: error.message }
+  }
+  
+  // ===== 데이터 통합 및 교차 검증 =====
+  const allCompetitors: Map<string, any> = new Map()
+  
+  // 각 소스에서 경쟁업체 수집 및 중복 제거
+  const addCompetitors = (source: string, items: any[]) => {
+    items.forEach(item => {
+      const key = `${item.name}_${item.address}`.toLowerCase().replace(/\s/g, '')
+      if (!allCompetitors.has(key)) {
+        allCompetitors.set(key, { ...item, sources: [source] })
+      } else {
+        const existing = allCompetitors.get(key)
+        if (!existing.sources.includes(source)) {
+          existing.sources.push(source)
+        }
+        // 추가 정보 병합
+        if (item.phone && !existing.phone) existing.phone = item.phone
+        if (item.distance && !existing.distance) existing.distance = item.distance
+        if (item.placeUrl && !existing.placeUrl) existing.placeUrl = item.placeUrl
+      }
+    })
+  }
+  
+  if (results.sources.kakao?.items) addCompetitors('kakao', results.sources.kakao.items)
+  if (results.sources.tmap?.items) addCompetitors('tmap', results.sources.tmap.items)
+  if (results.sources.naver?.items) addCompetitors('naver', results.sources.naver.items)
+  if (results.sources.semas?.items) addCompetitors('semas', results.sources.semas.items)
+  
+  // 경쟁업체 리스트 (여러 소스에서 확인된 업체 우선)
+  results.competitors = Array.from(allCompetitors.values())
+    .sort((a, b) => {
+      // 1. 다중 소스 확인된 업체 우선
+      if (b.sources.length !== a.sources.length) return b.sources.length - a.sources.length
+      // 2. 거리순
+      return (a.distance || 9999) - (b.distance || 9999)
+    })
+  
+  // ===== 요약 통계 생성 =====
+  const kakaoCount = results.sources.kakao?.totalCount || 0
+  const tmapCount = results.sources.tmap?.totalCount || 0
+  const semasCount = results.sources.semas?.targetCategoryCount || 0
+  
+  // 추정치 계산 (가중 평균)
+  const estimatedCount = Math.round(
+    (kakaoCount * 0.4) + (tmapCount * 0.3) + (semasCount * 0.3)
+  )
+  
+  const areaKm2 = Math.PI * Math.pow(parseInt(radius) / 1000, 2)
+  const density = estimatedCount / areaKm2
+  
+  // 위험도 평가
+  let riskLevel = ''
+  let riskColor = ''
+  let riskDescription = ''
+  
+  if (estimatedCount === 0) {
+    riskLevel = '블루오션'
+    riskColor = 'blue'
+    riskDescription = '경쟁업체가 거의 없는 미개척 시장'
+  } else if (estimatedCount <= 10) {
+    riskLevel = '낮음'
+    riskColor = 'green'
+    riskDescription = `경쟁업체 ${estimatedCount}개 - 진입 용이`
+  } else if (estimatedCount <= 30) {
+    riskLevel = '보통'
+    riskColor = 'yellow'
+    riskDescription = `경쟁업체 ${estimatedCount}개 - 차별화 필요`
+  } else if (estimatedCount <= 70) {
+    riskLevel = '높음'
+    riskColor = 'orange'
+    riskDescription = `경쟁업체 ${estimatedCount}개 - 치열한 경쟁`
+  } else {
+    riskLevel = '매우 높음'
+    riskColor = 'red'
+    riskDescription = `경쟁업체 ${estimatedCount}개 - 레드오션`
+  }
+  
+  results.summary = {
+    estimatedCompetitors: estimatedCount,
+    areaKm2: Math.round(areaKm2 * 100) / 100,
+    density: Math.round(density * 10) / 10,
+    riskLevel,
+    riskColor,
+    riskDescription,
+    totalStores: results.sources.semas?.totalCount || 0,
+    dataComparison: {
+      kakao: kakaoCount,
+      tmap: tmapCount,
+      semas: semasCount,
+      crossVerified: results.competitors.filter((c: any) => c.sources.length > 1).length
+    },
+    reliability: results.competitors.filter((c: any) => c.sources.length > 1).length > 5 ? '높음' : '보통'
+  }
+  
+  return c.json(results)
+})
+
 // API Keys for frontend (Naver Map)
 app.get('/api/config/naver-map', (c) => {
   return c.json({
@@ -1710,7 +2024,7 @@ app.get('/', (c) => {
       document.getElementById('resultSection').classList.add('hidden');
 
       try {
-        updateLoading('주변 상권 데이터를 수집하고 있습니다...', '네이버 지역검색 API 연동 중');
+        updateLoading('주변 상권 데이터를 수집하고 있습니다...', '카카오 + T-MAP + 네이버 + 소상공인 API 연동 중');
         
         const storeData = await fetchStoreData();
         
@@ -1743,12 +2057,13 @@ app.get('/', (c) => {
     }
 
     async function fetchStoreData() {
-      // 좌표와 반경, 업종 전달 (소상공인 공식 API 사용)
-      const categoryEncoded = encodeURIComponent(selectedCategoryName || '');
+      // 🔥 다중 API 통합 분석 API 사용 (카카오 + T-MAP + 네이버 + 소상공인)
+      const categoryEncoded = encodeURIComponent(selectedCategoryName || '미용실');
+      const addressEncoded = encodeURIComponent(selectedAddress || '');
       
-      let url = \`/api/semas/radius?cx=\${selectedLon}&cy=\${selectedLat}&radius=\${selectedRadius}&category=\${categoryEncoded}\`;
+      let url = \`/api/analysis/multi?cx=\${selectedLon}&cy=\${selectedLat}&radius=\${selectedRadius}&category=\${categoryEncoded}&address=\${addressEncoded}\`;
       
-      console.log('Fetching store data with URL:', url);
+      console.log('🔥 Fetching multi-API data:', url);
       
       const response = await fetch(url);
       const data = await response.json();
@@ -1757,83 +2072,53 @@ app.get('/', (c) => {
         throw new Error(data.error);
       }
       
-      console.log('Store data received:', data);
-      console.log('Data source:', data.dataSource);
-      console.log('Total count:', data.body?.totalCount);
-      console.log('Target category count:', data.body?.targetCategoryCount);
+      console.log('📊 Multi-API data received:', data);
+      console.log('📍 Sources:', Object.keys(data.sources || {}));
+      console.log('🎯 Estimated competitors:', data.summary?.estimatedCompetitors);
+      console.log('🔍 Cross verified:', data.summary?.dataComparison?.crossVerified);
       return data;
     }
 
     function analyzeStoreData(data) {
-      const items = data.body?.items || [];
-      const totalCount = data.body?.totalCount || 0;
-      // 서버에서 계산한 동종 업종 수 사용
-      const targetCategoryCount = data.body?.targetCategoryCount || 0;
-      const dataDate = data.body?.dataDate || '';
-      const dataSource = data.dataSource || '';
+      // 🔥 다중 API 통합 분석 결과 처리
+      const summary = data.summary || {};
+      const sources = data.sources || {};
+      const meta = data.meta || {};
+      const competitors = data.competitors || [];
+      const categoryBreakdown = data.categoryBreakdown || {};
       
-      // 서버에서 받은 업종별 카운트 사용 (소상공인 API)
-      const serverCategoryCount = data.body?.categoryCount || {};
+      // 추정 경쟁업체 수 (카카오, T-MAP, 소상공인 가중 평균)
+      const sameCategoryCount = summary.estimatedCompetitors || 0;
+      const totalCount = summary.totalStores || 
+        (sources.semas?.totalCount || 0) || 
+        Math.max(sources.kakao?.totalCount || 0, sources.tmap?.totalCount || 0) * 10;
       
-      // 업종별 카운트 (서버 데이터 우선, 없으면 클라이언트에서 집계)
+      const areaKm2 = summary.areaKm2 || Math.PI * Math.pow(selectedRadius / 1000, 2);
+      const density = summary.density || (sameCategoryCount / areaKm2).toFixed(1);
+      const competitorDensity = (sameCategoryCount / areaKm2).toFixed(1);
+      
+      // 서버에서 계산한 위험도 사용
+      const riskLevel = summary.riskLevel || '보통';
+      const riskColor = {
+        '블루오션': 'text-blue-600',
+        '낮음': 'text-green-600',
+        '보통': 'text-yellow-600',
+        '높음': 'text-orange-600',
+        '매우 높음': 'text-red-600'
+      }[riskLevel] || 'text-yellow-600';
+      const riskDescription = summary.riskDescription || '';
+      
+      // 업종별 카운트 (소상공인 API에서 가져온 데이터)
       let categoryCount = {};
-      
-      if (Object.keys(serverCategoryCount).length > 0) {
-        categoryCount = serverCategoryCount;
-      } else {
-        const categoryNames = {
-          'I2': '음식', 'G2': '소매', 'S2': '수리/개인', 
-          'R1': '예술/스포츠', 'L1': '부동산', 'P1': '교육', 
-          'Q1': '보건의료', 'N1': '시설관리/임대', 'M1': '전문/과학', 'F1': '건설'
-        };
-        
-        items.forEach(item => {
-          const code = (item.indsLclsCd || '').substring(0, 2);
-          const name = item.indsMclsNm || categoryNames[code] || '기타';
-          if (!categoryCount[name]) {
-            categoryCount[name] = { count: 0, items: [] };
-          }
-          categoryCount[name].count++;
-          categoryCount[name].items.push(item);
+      if (Object.keys(categoryBreakdown).length > 0) {
+        Object.entries(categoryBreakdown).forEach(([name, count]) => {
+          categoryCount[name] = { count: count, items: [] };
         });
       }
       
-      // 동종 업종 업체 목록 (서버에서 제공)
-      const competitorList = data.body?.competitorList || [];
-      
-      // 동종 업종 수
-      const sameCategoryCount = targetCategoryCount;
-      
-      const areaKm2 = Math.PI * Math.pow(selectedRadius / 1000, 2);
-      const density = (totalCount / areaKm2).toFixed(1);
-      const competitorDensity = (sameCategoryCount / areaKm2).toFixed(1);
-      
-      // 경쟁 위험도 계산 (동종 업종 기준으로 더 세분화)
-      let riskLevel = '낮음';
-      let riskColor = 'text-green-600';
-      let riskDescription = '';
-      
-      if (sameCategoryCount === 0) {
-        riskLevel = '블루오션';
-        riskColor = 'text-blue-600';
-        riskDescription = '경쟁업체 없음 (신규 시장)';
-      } else if (sameCategoryCount <= 5) {
-        riskLevel = '낮음';
-        riskColor = 'text-green-600';
-        riskDescription = \`경쟁업체 \${sameCategoryCount}개 (진입 용이)\`;
-      } else if (sameCategoryCount <= 15) {
-        riskLevel = '보통';
-        riskColor = 'text-yellow-600';
-        riskDescription = \`경쟁업체 \${sameCategoryCount}개 (경쟁 존재)\`;
-      } else if (sameCategoryCount <= 30) {
-        riskLevel = '높음';
-        riskColor = 'text-orange-600';
-        riskDescription = \`경쟁업체 \${sameCategoryCount}개 (치열한 경쟁)\`;
-      } else {
-        riskLevel = '매우 높음';
-        riskColor = 'text-red-600';
-        riskDescription = \`경쟁업체 \${sameCategoryCount}개 (레드오션)\`;
-      }
+      // 데이터 소스 정보
+      const dataComparison = summary.dataComparison || {};
+      const dataSourceInfo = \`카카오(\${dataComparison.kakao || 0}개) + T-MAP(\${dataComparison.tmap || 0}개) + 교차검증(\${dataComparison.crossVerified || 0}개)\`;
       
       return {
         totalCount,
@@ -1844,13 +2129,18 @@ app.get('/', (c) => {
         riskColor,
         riskDescription,
         categoryCount,
-        items,
-        competitorList,
-        dataDate,
-        dataSource,
-        address: selectedAddress,
+        items: competitors,  // 통합 경쟁업체 목록
+        competitorList: competitors,
+        dataDate: new Date().toISOString().split('T')[0].replace(/-/g, ''),  // 2026년 1월
+        dataSource: 'multi_api_analysis',
+        dataSourceInfo,
+        dataSources: sources,
+        dataComparison,
+        reliability: summary.reliability || '보통',
+        address: selectedAddress || meta.address,
         radius: selectedRadius,
-        category: selectedCategoryName
+        category: selectedCategoryName || meta.category,
+        searchLocation: meta.address
       };
     }
 
@@ -1888,11 +2178,23 @@ app.get('/', (c) => {
     }
 
     async function performAIAnalysis(result) {
-      // 경쟁업체 목록 (최대 10개)
-      const competitorSample = result.competitorList?.slice(0, 10).map(c => \`- \${c.name} (\${c.address})\`).join('\\n') || '정보 없음';
+      // 🔥 다중 API 경쟁업체 목록 (교차 검증된 업체 우선, 최대 15개)
+      const crossVerifiedCompetitors = result.competitorList?.filter(c => c.sources?.length > 1) || [];
+      const singleSourceCompetitors = result.competitorList?.filter(c => c.sources?.length === 1) || [];
+      const topCompetitors = [...crossVerifiedCompetitors, ...singleSourceCompetitors].slice(0, 15);
+      
+      const competitorSample = topCompetitors.map(c => {
+        const sources = c.sources?.join('+') || 'unknown';
+        const distance = c.distance ? \` [\${c.distance}m]\` : '';
+        return \`- \${c.name}\${distance} (\${c.address}) [출처: \${sources}]\`;
+      }).join('\\n') || '정보 없음';
+      
+      // 데이터 소스 비교 정보
+      const dataComparison = result.dataComparison || {};
+      const sourceInfo = \`카카오(\${dataComparison.kakao || 0}개), T-MAP(\${dataComparison.tmap || 0}개), 교차검증(\${dataComparison.crossVerified || 0}개)\`;
       
       const prompt = \`
-당신은 10년 경력의 상권분석 전문 컨설턴트입니다. 아래 **실제 검색 데이터**를 기반으로 창업 희망자에게 정확하고 실용적인 분석 리포트를 작성해주세요.
+당신은 10년 경력의 상권분석 전문 컨설턴트입니다. 아래 **다중 API 실시간 데이터(2026년 1월 기준)**를 기반으로 창업 희망자에게 정확하고 실용적인 분석 리포트를 작성해주세요.
 
 ## 🎯 분석 대상 정보
 - **위치**: \${result.address}
@@ -1900,17 +2202,19 @@ app.get('/', (c) => {
 - **분석 반경**: \${result.radius}m (면적: 약 \${(Math.PI * Math.pow(result.radius/1000, 2)).toFixed(2)}km²)
 - **희망 창업 업종**: \${result.category}
 
-## 📊 상권 현황 데이터 (소상공인시장진흥공단 공식 API, 데이터 기준: \${result.dataDate || 'N/A'})
-- **전체 상가 수**: \${result.totalCount}개
-- **동종 업종(\${result.category}) 경쟁업체 수**: \${result.sameCategoryCount}개
-- **전체 상가 밀도**: \${result.density}개/km²
-- **동종 업종 밀도**: \${result.competitorDensity || (result.sameCategoryCount / (Math.PI * Math.pow(result.radius/1000, 2))).toFixed(1)}개/km²
+## 📊 상권 현황 데이터 (🔥 다중 API 교차 검증, 데이터 기준: 2026년 1월)
+- **데이터 소스**: \${sourceInfo}
+- **추정 경쟁업체 수**: \${result.sameCategoryCount}개 (카카오+T-MAP+소상공인 가중 평균)
+- **전체 상가 수**: \${result.totalCount || 'N/A'}개
+- **경쟁 밀도**: \${result.density}개/km²
+- **교차 검증된 업체**: \${dataComparison.crossVerified || 0}개 (여러 API에서 동시 확인)
 - **경쟁 위험도**: \${result.riskLevel} - \${result.riskDescription || ''}
+- **데이터 신뢰도**: \${result.reliability || '보통'}
 
-## 🏪 업종별 분포 현황
-\${Object.entries(result.categoryCount).sort((a,b) => b[1].count - a[1].count).map(([name, data]) => \`- \${name}: \${data.count}개 (\${((data.count/result.totalCount)*100).toFixed(1)}%)\`).join('\\n')}
+## 🏪 업종별 분포 현황 (소상공인 API 기준)
+\${Object.keys(result.categoryCount).length > 0 ? Object.entries(result.categoryCount).sort((a,b) => b[1].count - a[1].count).slice(0, 10).map(([name, data]) => \`- \${name}: \${data.count}개 (\${result.totalCount > 0 ? ((data.count/result.totalCount)*100).toFixed(1) : 0}%)\`).join('\\n') : '업종별 분포 데이터 없음 (카카오/T-MAP 기반 분석)'}
 
-## 🎯 주변 동종 업종(\${result.category}) 경쟁업체 샘플 (검색 결과 기준)
+## 🎯 주변 동종 업종(\${result.category}) 경쟁업체 목록 (다중 API 교차 검증)
 \${competitorSample}
 
 ---
