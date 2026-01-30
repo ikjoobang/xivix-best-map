@@ -1872,7 +1872,7 @@ app.get('/', (c) => {
 
 ## 📊 상권 현황 데이터 (네이버 지역검색 API 기준)
 - **전체 상가 수**: \${result.totalCount}개
-- **동종 업종(${result.category}) 경쟁업체 수**: \${result.sameCategoryCount}개
+- **동종 업종(\${result.category}) 경쟁업체 수**: \${result.sameCategoryCount}개
 - **전체 상가 밀도**: \${result.density}개/km²
 - **동종 업종 밀도**: \${result.competitorDensity || (result.sameCategoryCount / (Math.PI * Math.pow(result.radius/1000, 2))).toFixed(1)}개/km²
 - **경쟁 위험도**: \${result.riskLevel} - \${result.riskDescription || ''}
@@ -1880,7 +1880,7 @@ app.get('/', (c) => {
 ## 🏪 업종별 분포 현황
 \${Object.entries(result.categoryCount).sort((a,b) => b[1].count - a[1].count).map(([name, data]) => \`- \${name}: \${data.count}개 (\${((data.count/result.totalCount)*100).toFixed(1)}%)\`).join('\\n')}
 
-## 🎯 주변 동종 업종(${result.category}) 경쟁업체 샘플 (검색 결과 기준)
+## 🎯 주변 동종 업종(\${result.category}) 경쟁업체 샘플 (검색 결과 기준)
 \${competitorSample}
 
 ---
@@ -1892,7 +1892,7 @@ app.get('/', (c) => {
 ### 1. 상권 특성 요약 (3줄 이내)
 - 이 지역이 어떤 상권인지 한눈에 파악할 수 있게
 
-### 2. ${result.category} 창업 기회 분석
+### 2. \${result.category} 창업 기회 분석
 - 동종 업종 \${result.sameCategoryCount}개 기준으로 시장 진입 난이도
 - 구체적 숫자와 함께 기회 요인 2~3개
 
