@@ -192,21 +192,37 @@ app.get('/api/semas/radius', async (c) => {
   const cy = c.req.query('cy')
   const radius = c.req.query('radius') || '500'
   const category = c.req.query('category') || ''
+  const address = c.req.query('address') || ''  // 지역명 추가
   
   if (!cx || !cy) {
     return c.json({ error: 'cx and cy are required' }, 400)
   }
   
   try {
-    // 네이버 지역 검색 API를 사용하여 주변 상가 정보 조회
-    // 여러 카테고리를 검색하여 상권 데이터 수집
-    const categories = ['음식점', '카페', '편의점', '미용실', '병원', '약국', '학원', '헬스장', '부동산', '마트'];
+    // 지역명 추출 (주소에서 동/읍/면 추출)
+    let locationKeyword = '';
+    if (address) {
+      // "부산 기장군 정관읍 매학리" -> "정관" 또는 "정관읍"
+      const match = address.match(/([가-힣]+(?:동|읍|면|리|구|시|군))/g);
+      if (match && match.length >= 2) {
+        // 구/군 + 동/읍/면 조합
+        locationKeyword = match.slice(-2).join(' ').replace(/[동읍면리]$/, '');
+      } else if (match) {
+        locationKeyword = match[match.length - 1].replace(/[동읍면리]$/, '');
+      }
+    }
+    
+    // 검색할 업종 카테고리 목록
+    const baseCategories = ['음식점', '카페', '편의점', '미용실', '병원', '약국', '학원', '헬스장', '부동산', '마트', '세탁소', '네일샵', '피부관리'];
     const allItems: any[] = [];
     
-    for (const cat of categories) {
-      const searchQuery = category ? `${category}` : cat;
+    // 1. 선택한 업종을 먼저 집중 검색 (display=50)
+    if (category) {
+      const searchQuery = locationKeyword ? `${locationKeyword} ${category}` : category;
+      console.log('Category Search Query:', searchQuery);
+      
       const response = await fetch(
-        `https://openapi.naver.com/v1/search/local.json?query=${encodeURIComponent(searchQuery)}&display=5&sort=random`,
+        `https://openapi.naver.com/v1/search/local.json?query=${encodeURIComponent(searchQuery)}&display=50&sort=comment`,
         {
           headers: {
             'X-Naver-Client-Id': c.env.NAVER_CLIENT_ID,
@@ -219,32 +235,57 @@ app.get('/api/semas/radius', async (c) => {
         const data = await response.json();
         const items = data.items || [];
         items.forEach((item: any) => {
-          // 카테고리 코드 매핑
-          let indsLclsCd = 'Z';
-          const catLower = item.category?.toLowerCase() || '';
-          if (catLower.includes('음식') || catLower.includes('카페') || catLower.includes('식당')) indsLclsCd = 'Q';
-          else if (catLower.includes('판매') || catLower.includes('마트') || catLower.includes('편의점') || catLower.includes('소매')) indsLclsCd = 'D';
-          else if (catLower.includes('미용') || catLower.includes('세탁') || catLower.includes('서비스')) indsLclsCd = 'F';
-          else if (catLower.includes('스포츠') || catLower.includes('헬스') || catLower.includes('오락')) indsLclsCd = 'N';
-          else if (catLower.includes('부동산')) indsLclsCd = 'L';
-          else if (catLower.includes('학원') || catLower.includes('교육')) indsLclsCd = 'P';
-          else if (catLower.includes('병원') || catLower.includes('의원') || catLower.includes('약국') || catLower.includes('의료')) indsLclsCd = 'R';
-          
           allItems.push({
             bizesNm: item.title?.replace(/<[^>]*>/g, '') || '',
-            indsLclsCd,
+            indsLclsCd: getCategoryCode(item.category, category),
+            indsLclsNm: item.category || category,
+            indsMclsNm: item.category || '',
+            rdnmAdr: item.roadAddress || item.address || '',
+            lnoAdr: item.address || '',
+            lon: item.mapx ? parseInt(item.mapx) / 10000000 : parseFloat(cx),
+            lat: item.mapy ? parseInt(item.mapy) / 10000000 : parseFloat(cy),
+            isTargetCategory: true  // 동종 업종 표시
+          });
+        });
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    // 2. 기타 업종들 검색 (전체 상권 파악용)
+    for (const cat of baseCategories) {
+      if (category && cat === category) continue; // 이미 검색한 카테고리 스킵
+      
+      const searchQuery = locationKeyword ? `${locationKeyword} ${cat}` : cat;
+      
+      const response = await fetch(
+        `https://openapi.naver.com/v1/search/local.json?query=${encodeURIComponent(searchQuery)}&display=20&sort=comment`,
+        {
+          headers: {
+            'X-Naver-Client-Id': c.env.NAVER_CLIENT_ID,
+            'X-Naver-Client-Secret': c.env.NAVER_CLIENT_SECRET
+          }
+        }
+      );
+      
+      if (response.ok) {
+        const data = await response.json();
+        const items = data.items || [];
+        items.forEach((item: any) => {
+          allItems.push({
+            bizesNm: item.title?.replace(/<[^>]*>/g, '') || '',
+            indsLclsCd: getCategoryCode(item.category, cat),
             indsLclsNm: item.category || cat,
             indsMclsNm: item.category || '',
             rdnmAdr: item.roadAddress || item.address || '',
             lnoAdr: item.address || '',
             lon: item.mapx ? parseInt(item.mapx) / 10000000 : parseFloat(cx),
-            lat: item.mapy ? parseInt(item.mapy) / 10000000 : parseFloat(cy)
+            lat: item.mapy ? parseInt(item.mapy) / 10000000 : parseFloat(cy),
+            isTargetCategory: false
           });
         });
       }
       
-      // API 호출 간 딜레이
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
     
     // 중복 제거
@@ -252,18 +293,51 @@ app.get('/api/semas/radius', async (c) => {
       index === self.findIndex(t => t.bizesNm === item.bizesNm && t.rdnmAdr === item.rdnmAdr)
     );
     
+    // 동종 업종 수 계산
+    const targetCategoryCount = uniqueItems.filter(item => item.isTargetCategory).length;
+    
     return c.json({
       body: {
         items: uniqueItems,
-        totalCount: uniqueItems.length
+        totalCount: uniqueItems.length,
+        targetCategoryCount,
+        searchLocation: locationKeyword,
+        searchCategory: category
       },
       dataSource: 'naver_local_search',
-      message: '네이버 지역검색 API 기반 데이터입니다. 실제 소상공인 상권정보와 차이가 있을 수 있습니다.'
+      message: `네이버 지역검색 API 기반 데이터입니다. 검색 지역: ${locationKeyword || '전국'}, 동종 업종(${category || '전체'}): ${targetCategoryCount}개`
     });
   } catch (error: any) {
     return c.json({ error: error.message }, 500)
   }
 })
+
+// 카테고리 코드 매핑 함수
+function getCategoryCode(naverCategory: string, searchedCategory: string): string {
+  const catLower = (naverCategory || '').toLowerCase();
+  const searched = (searchedCategory || '').toLowerCase();
+  
+  // 검색한 카테고리 기반 매핑
+  if (searched.includes('미용') || searched.includes('헤어') || searched.includes('네일') || searched.includes('피부')) return 'F';
+  if (searched.includes('음식') || searched.includes('카페') || searched.includes('식당') || searched.includes('치킨') || searched.includes('피자')) return 'Q';
+  if (searched.includes('편의점') || searched.includes('마트') || searched.includes('슈퍼')) return 'D';
+  if (searched.includes('병원') || searched.includes('약국') || searched.includes('의원') || searched.includes('치과')) return 'R';
+  if (searched.includes('학원') || searched.includes('교육')) return 'P';
+  if (searched.includes('헬스') || searched.includes('스포츠') || searched.includes('요가') || searched.includes('필라테스')) return 'N';
+  if (searched.includes('부동산')) return 'L';
+  if (searched.includes('세탁')) return 'F';
+  
+  // 네이버 카테고리 기반 매핑
+  if (catLower.includes('음식') || catLower.includes('카페') || catLower.includes('식당')) return 'Q';
+  if (catLower.includes('판매') || catLower.includes('마트') || catLower.includes('편의점') || catLower.includes('소매')) return 'D';
+  if (catLower.includes('미용') || catLower.includes('세탁') || catLower.includes('서비스') || catLower.includes('네일')) return 'F';
+  if (catLower.includes('스포츠') || catLower.includes('헬스') || catLower.includes('오락')) return 'N';
+  if (catLower.includes('부동산')) return 'L';
+  if (catLower.includes('학원') || catLower.includes('교육')) return 'P';
+  if (catLower.includes('병원') || catLower.includes('의원') || catLower.includes('약국') || catLower.includes('의료')) return 'R';
+  
+  return 'Z';
+}
 
 // 네이버 지역 검색 API
 app.get('/api/naver/local', async (c) => {
@@ -1642,7 +1716,13 @@ app.get('/', (c) => {
     }
 
     async function fetchStoreData() {
-      let url = \`/api/semas/radius?cx=\${selectedLon}&cy=\${selectedLat}&radius=\${selectedRadius}\`;
+      // 주소와 선택한 업종을 함께 전달
+      const addressEncoded = encodeURIComponent(selectedAddress || '');
+      const categoryEncoded = encodeURIComponent(selectedCategoryName || '');
+      
+      let url = \`/api/semas/radius?cx=\${selectedLon}&cy=\${selectedLat}&radius=\${selectedRadius}&address=\${addressEncoded}&category=\${categoryEncoded}\`;
+      
+      console.log('Fetching store data with URL:', url);
       
       const response = await fetch(url);
       const data = await response.json();
@@ -1651,12 +1731,16 @@ app.get('/', (c) => {
         throw new Error(data.error);
       }
       
+      console.log('Store data received:', data);
       return data;
     }
 
     function analyzeStoreData(data) {
       const items = data.body?.items || [];
       const totalCount = data.body?.totalCount || 0;
+      // 서버에서 계산한 동종 업종 수 사용
+      const targetCategoryCount = data.body?.targetCategoryCount || 0;
+      const searchLocation = data.body?.searchLocation || '';
       
       const categoryCount = {};
       const categoryNames = {
@@ -1664,6 +1748,9 @@ app.get('/', (c) => {
         'N': '스포츠/오락', 'L': '부동산', 'P': '학문/교육', 
         'R': '의료', 'O': '숙박', 'S': '수리/개인', 'E': '제조'
       };
+      
+      // 동종 업종 업체 목록 수집
+      const competitorList = [];
       
       items.forEach(item => {
         const code = item.indsLclsCd || 'Z';
@@ -1673,32 +1760,64 @@ app.get('/', (c) => {
         }
         categoryCount[name].count++;
         categoryCount[name].items.push(item);
+        
+        // 동종 업종이면 경쟁업체 목록에 추가
+        if (item.isTargetCategory) {
+          competitorList.push({
+            name: item.bizesNm,
+            address: item.rdnmAdr || item.lnoAdr,
+            category: item.indsLclsNm
+          });
+        }
       });
       
-      const sameCategoryCount = selectedCategory ? 
-        (categoryCount[selectedCategoryName]?.count || 0) : totalCount;
+      // 서버에서 받은 동종 업종 수 사용 (더 정확함)
+      const sameCategoryCount = targetCategoryCount > 0 ? targetCategoryCount : 
+        (selectedCategory ? (categoryCount[selectedCategoryName]?.count || 0) : totalCount);
       
       const areaKm2 = Math.PI * Math.pow(selectedRadius / 1000, 2);
       const density = (totalCount / areaKm2).toFixed(1);
+      const competitorDensity = (sameCategoryCount / areaKm2).toFixed(1);
       
+      // 경쟁 위험도 계산 (동종 업종 기준으로 더 세분화)
       let riskLevel = '낮음';
       let riskColor = 'text-green-600';
-      if (sameCategoryCount > 30) {
-        riskLevel = '높음';
-        riskColor = 'text-red-600';
-      } else if (sameCategoryCount > 15) {
+      let riskDescription = '';
+      
+      if (sameCategoryCount === 0) {
+        riskLevel = '블루오션';
+        riskColor = 'text-blue-600';
+        riskDescription = '경쟁업체 없음 (신규 시장)';
+      } else if (sameCategoryCount <= 5) {
+        riskLevel = '낮음';
+        riskColor = 'text-green-600';
+        riskDescription = \`경쟁업체 \${sameCategoryCount}개 (진입 용이)\`;
+      } else if (sameCategoryCount <= 15) {
         riskLevel = '보통';
         riskColor = 'text-yellow-600';
+        riskDescription = \`경쟁업체 \${sameCategoryCount}개 (경쟁 존재)\`;
+      } else if (sameCategoryCount <= 30) {
+        riskLevel = '높음';
+        riskColor = 'text-orange-600';
+        riskDescription = \`경쟁업체 \${sameCategoryCount}개 (치열한 경쟁)\`;
+      } else {
+        riskLevel = '매우 높음';
+        riskColor = 'text-red-600';
+        riskDescription = \`경쟁업체 \${sameCategoryCount}개 (레드오션)\`;
       }
       
       return {
         totalCount,
         sameCategoryCount,
         density,
+        competitorDensity,
         riskLevel,
         riskColor,
+        riskDescription,
         categoryCount,
         items,
+        competitorList,
+        searchLocation,
         address: selectedAddress,
         radius: selectedRadius,
         category: selectedCategoryName
@@ -1739,32 +1858,61 @@ app.get('/', (c) => {
     }
 
     async function performAIAnalysis(result) {
+      // 경쟁업체 목록 (최대 10개)
+      const competitorSample = result.competitorList?.slice(0, 10).map(c => \`- \${c.name} (\${c.address})\`).join('\\n') || '정보 없음';
+      
       const prompt = \`
-당신은 상권분석 전문가입니다. 아래 데이터를 기반으로 창업 희망자에게 맞춤형 분석 리포트를 작성해주세요.
+당신은 10년 경력의 상권분석 전문 컨설턴트입니다. 아래 **실제 검색 데이터**를 기반으로 창업 희망자에게 정확하고 실용적인 분석 리포트를 작성해주세요.
 
-## 분석 대상 정보
-- 위치: \${result.address}
-- 분석 반경: \${result.radius}m
-- 희망 업종: \${result.category}
+## 🎯 분석 대상 정보
+- **위치**: \${result.address}
+- **검색 지역**: \${result.searchLocation || result.address}
+- **분석 반경**: \${result.radius}m (면적: 약 \${(Math.PI * Math.pow(result.radius/1000, 2)).toFixed(2)}km²)
+- **희망 창업 업종**: \${result.category}
 
-## 상권 현황 데이터 (네이버 지역검색 API 기반)
-- 총 상가 수: \${result.totalCount}개
-- 동종 업종 수: \${result.sameCategoryCount}개
-- 상가 밀도: \${result.density}개/km²
-- 경쟁 위험도: \${result.riskLevel}
+## 📊 상권 현황 데이터 (네이버 지역검색 API 기준)
+- **전체 상가 수**: \${result.totalCount}개
+- **동종 업종(${result.category}) 경쟁업체 수**: \${result.sameCategoryCount}개
+- **전체 상가 밀도**: \${result.density}개/km²
+- **동종 업종 밀도**: \${result.competitorDensity || (result.sameCategoryCount / (Math.PI * Math.pow(result.radius/1000, 2))).toFixed(1)}개/km²
+- **경쟁 위험도**: \${result.riskLevel} - \${result.riskDescription || ''}
 
-## 업종별 분포 (실제 데이터)
-\${Object.entries(result.categoryCount).map(([name, data]) => \`- \${name}: \${data.count}개 (\${((data.count/result.totalCount)*100).toFixed(1)}%)\`).join('\\n')}
+## 🏪 업종별 분포 현황
+\${Object.entries(result.categoryCount).sort((a,b) => b[1].count - a[1].count).map(([name, data]) => \`- \${name}: \${data.count}개 (\${((data.count/result.totalCount)*100).toFixed(1)}%)\`).join('\\n')}
 
-## 요청사항
-1. 해당 지역의 상권 특성을 **데이터 기반**으로 분석해주세요
-2. \${result.category} 업종 창업 시 예상되는 기회와 위험을 **구체적인 숫자와 함께** 분석해주세요
-3. 경쟁 현황과 차별화 전략을 제안해주세요
-4. 네이버스마트플레이스와 구글 비즈니스 등록 전 준비사항을 안내해주세요
-5. 모든 분석에는 **근거(데이터 출처, 계산 방식)**를 명시해주세요
+## 🎯 주변 동종 업종(${result.category}) 경쟁업체 샘플 (검색 결과 기준)
+\${competitorSample}
 
-응답은 마크다운 형식으로 작성하되, 한국어로 작성해주세요.
-각 섹션은 ## 헤더로 구분하고, 핵심 내용은 **볼드**로 강조해주세요.
+---
+
+## 📝 분석 요청사항
+
+다음 형식으로 **간결하고 실용적인** 분석을 작성해주세요:
+
+### 1. 상권 특성 요약 (3줄 이내)
+- 이 지역이 어떤 상권인지 한눈에 파악할 수 있게
+
+### 2. ${result.category} 창업 기회 분석
+- 동종 업종 \${result.sameCategoryCount}개 기준으로 시장 진입 난이도
+- 구체적 숫자와 함께 기회 요인 2~3개
+
+### 3. 위험 요인 분석  
+- 경쟁업체 현황 기반 실질적 위협 요소
+- 주의해야 할 점 2~3개
+
+### 4. 차별화 전략 제안 (구체적으로)
+- 이 지역에서 성공하려면 어떤 차별화가 필요한지
+- 실행 가능한 아이디어 2~3개
+
+### 5. 핵심 결론 (1줄)
+- 창업 추천/비추천 여부와 핵심 이유
+
+---
+⚠️ 중요: 
+- **환각 금지**: 제공된 데이터만 사용하세요
+- **숫자 정확히**: 동종업종 \${result.sameCategoryCount}개를 정확히 반영하세요
+- **간결하게**: 각 섹션 3~5줄 이내로 작성
+- **실용적으로**: 창업자가 바로 활용할 수 있는 정보만
 \`;
 
       try {
@@ -1903,15 +2051,43 @@ app.get('/', (c) => {
     }
 
     function formatMarkdown(text) {
-      return text
-        .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-        .replace(/^### (.+)$/gm, '<h3>$1</h3>')
-        .replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>')
-        .replace(/^- (.+)$/gm, '<li>$1</li>')
-        .replace(/(<li>.*<\\/li>)/s, '<ul>$1</ul>')
-        .replace(/^(\\d+)\\. (.+)$/gm, '<li>$2</li>')
-        .replace(/\\n\\n/g, '</p><p>')
+      if (!text) return '';
+      
+      // 먼저 줄바꿈으로 분리
+      let html = text
+        // 헤더 처리 (#### -> h4, ### -> h3, ## -> h2)
+        .replace(/^#### (.+)$/gm, '<h4 class="text-base font-semibold text-green-600 mt-4 mb-2">$1</h4>')
+        .replace(/^### (.+)$/gm, '<h3 class="text-lg font-semibold text-gray-800 dark:text-gray-200 mt-5 mb-3 border-b border-gray-200 dark:border-gray-700 pb-2">$1</h3>')
+        .replace(/^## (.+)$/gm, '<h2 class="text-xl font-bold text-green-700 dark:text-green-400 mt-6 mb-4 flex items-center gap-2"><span class="w-1 h-6 bg-green-500 rounded"></span>$1</h2>')
+        // 볼드 처리
+        .replace(/\\*\\*(.+?)\\*\\*/g, '<strong class="text-gray-900 dark:text-white font-semibold">$1</strong>')
+        // 이탤릭 처리
+        .replace(/\\*(.+?)\\*/g, '<em class="text-gray-700 dark:text-gray-300">$1</em>')
+        // 리스트 처리 (- 로 시작)
+        .replace(/^- (.+)$/gm, '<li class="flex items-start gap-2 mb-2"><span class="text-green-500 mt-1">•</span><span>$1</span></li>')
+        // 숫자 리스트 처리
+        .replace(/^(\\d+)\\. (.+)$/gm, '<li class="flex items-start gap-2 mb-2"><span class="text-green-600 font-semibold min-w-[20px]">$1.</span><span>$2</span></li>')
+        // > 인용문 처리
+        .replace(/^> (.+)$/gm, '<blockquote class="border-l-4 border-green-500 pl-4 py-2 my-3 bg-green-50 dark:bg-green-900/20 rounded-r text-gray-700 dark:text-gray-300 italic">$1</blockquote>')
+        // 코드 블록 처리
+        .replace(/\`([^\`]+)\`/g, '<code class="bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded text-sm text-red-600 dark:text-red-400">$1</code>')
+        // 구분선 처리
+        .replace(/^---$/gm, '<hr class="my-6 border-gray-200 dark:border-gray-700">')
+        // 단락 처리
+        .replace(/\\n\\n/g, '</p><p class="mb-4 text-gray-700 dark:text-gray-300 leading-relaxed">')
         .replace(/\\n/g, '<br>');
+      
+      // ul/ol 태그로 리스트 감싸기
+      html = html.replace(/(<li class="flex.*?<\\/li>\\s*)+/g, (match) => {
+        return '<ul class="space-y-1 my-4 pl-2">' + match + '</ul>';
+      });
+      
+      // 시작 p 태그 추가
+      if (!html.startsWith('<h') && !html.startsWith('<ul') && !html.startsWith('<blockquote')) {
+        html = '<p class="mb-4 text-gray-700 dark:text-gray-300 leading-relaxed">' + html + '</p>';
+      }
+      
+      return html;
     }
 
     // Enter 키 검색 지원
