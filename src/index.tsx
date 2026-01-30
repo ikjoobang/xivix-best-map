@@ -278,8 +278,11 @@ app.get('/api/semas/radius', async (c) => {
       categoryCount[mclsNm].count++;
       categoryCount[mclsNm].items.push(item);
       
-      // 동종 업종 체크
-      if (targetCodes.length > 0 && targetCodes.includes(mclsCd)) {
+      // 동종 업종 체크 - isTargetCategory 플래그 설정
+      const isTarget = targetCodes.length > 0 && targetCodes.includes(mclsCd);
+      item.isTargetCategory = isTarget;
+      
+      if (isTarget) {
         targetCategoryCount++;
         competitorList.push({
           name: item.bizesNm,
@@ -298,10 +301,12 @@ app.get('/api/semas/radius', async (c) => {
         const bizName = (item.bizesNm || '').toLowerCase();
         const categoryLower = category.toLowerCase();
         
-        if (
+        const isMatch = 
           (categoryLower.includes('미용') && (bizName.includes('미용') || bizName.includes('헤어') || bizName.includes('hair'))) ||
-          (categoryLower.includes('카페') && (bizName.includes('카페') || bizName.includes('cafe') || bizName.includes('커피')))
-        ) {
+          (categoryLower.includes('카페') && (bizName.includes('카페') || bizName.includes('cafe') || bizName.includes('커피')));
+        
+        if (isMatch) {
+          item.isTargetCategory = true;
           targetCategoryCount++;
           competitorList.push({
             name: item.bizesNm,
