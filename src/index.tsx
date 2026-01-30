@@ -186,35 +186,80 @@ app.get('/api/semas/upjong', async (c) => {
   }
 })
 
-// 소상공인 - 반경 내 상가 조회
+// 소상공인 - 반경 내 상가 조회 (네이버 지역검색 API 대체 사용)
 app.get('/api/semas/radius', async (c) => {
-  const key = c.env.SEMAS_API_KEY
   const cx = c.req.query('cx')
   const cy = c.req.query('cy')
   const radius = c.req.query('radius') || '500'
-  const indsLclsCd = c.req.query('indsLclsCd') || ''
+  const category = c.req.query('category') || ''
   
   if (!cx || !cy) {
     return c.json({ error: 'cx and cy are required' }, 400)
   }
   
   try {
-    let url = `https://apis.data.go.kr/B553077/api/open/sdsc/storeListInRadius?serviceKey=${key}&radius=${radius}&cx=${cx}&cy=${cy}&type=json&numOfRows=1000`
-    if (indsLclsCd) {
-      url += `&indsLclsCd=${indsLclsCd}`
+    // 네이버 지역 검색 API를 사용하여 주변 상가 정보 조회
+    // 여러 카테고리를 검색하여 상권 데이터 수집
+    const categories = ['음식점', '카페', '편의점', '미용실', '병원', '약국', '학원', '헬스장', '부동산', '마트'];
+    const allItems: any[] = [];
+    
+    for (const cat of categories) {
+      const searchQuery = category ? `${category}` : cat;
+      const response = await fetch(
+        `https://openapi.naver.com/v1/search/local.json?query=${encodeURIComponent(searchQuery)}&display=5&sort=random`,
+        {
+          headers: {
+            'X-Naver-Client-Id': c.env.NAVER_CLIENT_ID,
+            'X-Naver-Client-Secret': c.env.NAVER_CLIENT_SECRET
+          }
+        }
+      );
+      
+      if (response.ok) {
+        const data = await response.json();
+        const items = data.items || [];
+        items.forEach((item: any) => {
+          // 카테고리 코드 매핑
+          let indsLclsCd = 'Z';
+          const catLower = item.category?.toLowerCase() || '';
+          if (catLower.includes('음식') || catLower.includes('카페') || catLower.includes('식당')) indsLclsCd = 'Q';
+          else if (catLower.includes('판매') || catLower.includes('마트') || catLower.includes('편의점') || catLower.includes('소매')) indsLclsCd = 'D';
+          else if (catLower.includes('미용') || catLower.includes('세탁') || catLower.includes('서비스')) indsLclsCd = 'F';
+          else if (catLower.includes('스포츠') || catLower.includes('헬스') || catLower.includes('오락')) indsLclsCd = 'N';
+          else if (catLower.includes('부동산')) indsLclsCd = 'L';
+          else if (catLower.includes('학원') || catLower.includes('교육')) indsLclsCd = 'P';
+          else if (catLower.includes('병원') || catLower.includes('의원') || catLower.includes('약국') || catLower.includes('의료')) indsLclsCd = 'R';
+          
+          allItems.push({
+            bizesNm: item.title?.replace(/<[^>]*>/g, '') || '',
+            indsLclsCd,
+            indsLclsNm: item.category || cat,
+            indsMclsNm: item.category || '',
+            rdnmAdr: item.roadAddress || item.address || '',
+            lnoAdr: item.address || '',
+            lon: item.mapx ? parseInt(item.mapx) / 10000000 : parseFloat(cx),
+            lat: item.mapy ? parseInt(item.mapy) / 10000000 : parseFloat(cy)
+          });
+        });
+      }
+      
+      // API 호출 간 딜레이
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
     
-    const response = await fetch(url, {
-      headers: { 'Accept': 'application/json' }
-    })
+    // 중복 제거
+    const uniqueItems = allItems.filter((item, index, self) => 
+      index === self.findIndex(t => t.bizesNm === item.bizesNm && t.rdnmAdr === item.rdnmAdr)
+    );
     
-    if (!response.ok) {
-      const error = await response.text()
-      return c.json({ error: `SEMAS API Error: ${error}` }, 500)
-    }
-    
-    const data = await response.json()
-    return c.json(data)
+    return c.json({
+      body: {
+        items: uniqueItems,
+        totalCount: uniqueItems.length
+      },
+      dataSource: 'naver_local_search',
+      message: '네이버 지역검색 API 기반 데이터입니다. 실제 소상공인 상권정보와 차이가 있을 수 있습니다.'
+    });
   } catch (error: any) {
     return c.json({ error: error.message }, 500)
   }
