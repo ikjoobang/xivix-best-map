@@ -1757,26 +1757,73 @@ app.get('/', (c) => {
     }
 
     async function performMarketingAnalysis(result) {
+      // 업종별 마케팅 특성 분류 (사사분면 모델 기반)
+      const categoryMarketingType = {
+        // 지역 + 정보형 (블로그 중심) - 실력/신뢰가 중요
+        '의료': { type: 'local_info', channels: ['네이버 블로그', '네이버 플레이스'], primary: '전문성 블로그 포스팅' },
+        '생활서비스': { type: 'local_info', channels: ['네이버 블로그', '네이버 플레이스'], primary: '전문성 블로그 포스팅' },
+        '부동산': { type: 'local_info', channels: ['네이버 블로그', '유튜브'], primary: '신뢰 구축 콘텐츠' },
+        
+        // 지역 + 이미지형 (블로그 + 네이버지도 중심) - 비주얼 중요
+        '음식점': { type: 'local_image', channels: ['네이버 플레이스', '네이버 블로그', '인스타그램'], primary: '네이버 지도 상위노출 + 사진 리뷰' },
+        '소매': { type: 'local_image', channels: ['네이버 플레이스', '인스타그램'], primary: '네이버 지도 + SNS 비주얼' },
+        '스포츠/오락': { type: 'local_image', channels: ['네이버 플레이스', '인스타그램 릴스'], primary: '시설 사진 + 체험 콘텐츠' },
+        
+        // 전국 + 정보형 (유튜브/릴스 + 블로그) - 전문성 신뢰
+        '학문/교육': { type: 'national_info', channels: ['유튜브', '블로그', '인스타그램'], primary: '전문성 영상 콘텐츠' },
+        
+        // 기본값
+        '전체': { type: 'local_image', channels: ['네이버 플레이스', '네이버 블로그'], primary: '네이버 플랫폼 최적화' }
+      };
+      
+      const marketingInfo = categoryMarketingType[result.category] || categoryMarketingType['전체'];
+      
       const prompt = \`
-당신은 소상공인 마케팅 전문가입니다. 아래 상권 데이터를 기반으로 맞춤형 마케팅 전략을 제안해주세요.
+당신은 소상공인 마케팅 전문가입니다. 
+**핵심만 간결하게!** 이 지역, 이 업종에 **꼭 필요한 마케팅 채널과 방법만** 추천하세요.
 
-## 상권 정보
-- 위치: \${result.address}
-- 희망 업종: \${result.category}
-- 주변 경쟁업체 수: \${result.sameCategoryCount}개
-- 경쟁 밀도: \${result.density}개/km²
+## 📍 분석 대상
+- **위치**: \${result.address}
+- **업종**: \${result.category}
+- **주변 경쟁업체**: \${result.sameCategoryCount}개
+- **경쟁 밀도**: \${result.density}개/km²
 
-## 요청사항
-1. 네이버 스마트플레이스 최적화 전략 (구체적인 설정 방법 포함)
-2. 구글 비즈니스 프로필 최적화 전략 (구체적인 설정 방법 포함)
-3. 온라인 마케팅 채널별 추천 (블로그, 인스타그램, 배달앱 등) - **예상 비용과 효과 포함**
-4. 오프라인 마케팅 전략
-5. 초기 3개월 마케팅 로드맵 (주차별 구체적 액션)
+## 🎯 마케팅 특성 분류
+이 업종은 **"\${marketingInfo.type === 'local_info' ? '지역+정보형' : marketingInfo.type === 'local_image' ? '지역+이미지형' : marketingInfo.type === 'national_info' ? '전국+정보형' : '전국+이미지형'}"** 유형입니다.
+- 주력 채널: \${marketingInfo.channels.join(', ')}
+- 핵심 전략: \${marketingInfo.primary}
 
-모든 제안에는 **왜 이 전략이 효과적인지 근거**를 포함해주세요.
+## 📋 요청사항 (간결하게 핵심만!)
 
-응답은 마크다운 형식으로 작성하고, 실행 가능한 구체적인 액션 아이템을 포함해주세요.
+아래 형식으로만 답변해주세요:
+
+### 🥇 1순위 마케팅 (반드시 해야 할 것)
+- **채널명**: 
+- **왜 필수인가**: (1줄)
+- **구체적 액션**: (3개 이내 불릿)
+- **예상 비용**: 
+- **기대 효과**: 
+
+### 🥈 2순위 마케팅 (하면 좋은 것)
+- **채널명**: 
+- **왜 추천인가**: (1줄)
+- **구체적 액션**: (3개 이내 불릿)
+- **예상 비용**: 
+- **기대 효과**: 
+
+### ❌ 이 업종에 비추천 마케팅
+- **채널명**과 **비추천 이유** (1줄씩, 2개 이내)
+
+### ✅ 이 지역 특화 팁 (1~2개)
+- \${result.address} 지역 특성에 맞는 마케팅 포인트
+
+---
+⚠️ 주의: 
+- 모든 마케팅을 다 하지 마세요. **주력 채널 1개에 집중**하세요.
+- 장황한 설명 없이 **실행 가능한 액션**만 제시하세요.
 \`;
+
+
 
       try {
         const response = await fetch('/api/gemini/analyze', {
