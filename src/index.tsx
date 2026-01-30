@@ -272,7 +272,7 @@ app.get('/', (c) => {
   <title>XIΛIX_BEST_MAP - 원클릭 상권분석</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet">
-  <script type="text/javascript" src="https://oapi.map.naver.com/openapi/v3/maps.js?ncpClientId=${naverMapClientId}"></script>
+  <script type="text/javascript" src="https://oapi.map.naver.com/openapi/v3/maps.js?ncpKeyId=${naverMapClientId}"></script>
   <style>
     /* =========================================
        Typography & Layout System
@@ -903,6 +903,27 @@ app.get('/', (c) => {
 
   <script>
     // ============================================
+    // 네이버 지도 인증 실패 콜백 함수
+    // ============================================
+    window.navermap_authFailure = function() {
+      console.error('네이버 지도 API 인증 실패!');
+      console.error('원인: Client ID 또는 서비스 URL이 올바르지 않습니다.');
+      console.error('현재 URL:', window.location.href);
+      
+      const mapEl = document.getElementById('map');
+      if (mapEl) {
+        mapEl.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;background:#1e1e1e;color:#e0e0e0;border-radius:12px;">' +
+          '<i class="fas fa-exclamation-triangle" style="font-size:48px;color:#ffc107;margin-bottom:16px;"></i>' +
+          '<p style="font-size:18px;font-weight:bold;margin-bottom:8px;">지도 인증 오류</p>' +
+          '<p style="font-size:14px;color:#999;">네이버 클라우드 플랫폼에서 서비스 URL 등록을 확인해주세요.</p>' +
+          '<p style="font-size:12px;color:#666;margin-top:8px;">현재 URL: ' + window.location.hostname + '</p>' +
+          '</div>';
+      }
+      
+      alert('네이버 지도 API 인증에 실패했습니다.\\n\\n네이버 클라우드 플랫폼(console.ncloud.com)에서:\\n1. Application 선택\\n2. Web Dynamic Map > Web 서비스 URL에 현재 도메인 추가\\n\\n현재 도메인: ' + window.location.hostname);
+    };
+
+    // ============================================
     // Global Variables
     // ============================================
     let map = null;
@@ -1176,23 +1197,56 @@ app.get('/', (c) => {
     // Initialize Map
     // ============================================
     function initMap() {
-      const mapOptions = {
-        center: new naver.maps.LatLng(37.5665, 126.9780),
-        zoom: 15,
-        zoomControl: true,
-        zoomControlOptions: {
-          position: naver.maps.Position.TOP_RIGHT
+      try {
+        // 네이버 지도 API 로드 확인
+        if (typeof naver === 'undefined' || !naver.maps) {
+          console.error('네이버 지도 API가 로드되지 않았습니다.');
+          const mapEl = document.getElementById('map');
+          if (mapEl) {
+            mapEl.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;background:#1e1e1e;color:#e0e0e0;border-radius:12px;">' +
+              '<i class="fas fa-spinner fa-spin" style="font-size:48px;color:#03C75A;margin-bottom:16px;"></i>' +
+              '<p style="font-size:16px;">지도를 불러오는 중...</p>' +
+              '</div>';
+          }
+          // 1초 후 재시도
+          setTimeout(initMap, 1000);
+          return;
         }
-      };
-      
-      map = new naver.maps.Map('map', mapOptions);
-      
-      naver.maps.Event.addListener(map, 'click', function(e) {
-        const lat = e.coord.lat();
-        const lon = e.coord.lng();
-        setLocation(lat, lon);
-        reverseGeocode(lat, lon);
-      });
+
+        console.log('네이버 지도 API 초기화 시작...');
+        
+        const mapOptions = {
+          center: new naver.maps.LatLng(37.5665, 126.9780),
+          zoom: 15,
+          zoomControl: true,
+          zoomControlOptions: {
+            position: naver.maps.Position.TOP_RIGHT
+          }
+        };
+        
+        map = new naver.maps.Map('map', mapOptions);
+        
+        console.log('네이버 지도 생성 완료!');
+        
+        naver.maps.Event.addListener(map, 'click', function(e) {
+          const lat = e.coord.lat();
+          const lon = e.coord.lng();
+          setLocation(lat, lon);
+          reverseGeocode(lat, lon);
+        });
+        
+        console.log('지도 이벤트 리스너 등록 완료!');
+      } catch (error) {
+        console.error('지도 초기화 오류:', error);
+        const mapEl = document.getElementById('map');
+        if (mapEl) {
+          mapEl.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;background:#fee2e2;color:#dc2626;border-radius:12px;padding:20px;text-align:center;">' +
+            '<i class="fas fa-exclamation-circle" style="font-size:48px;margin-bottom:16px;"></i>' +
+            '<p style="font-size:16px;font-weight:bold;">지도 초기화 오류</p>' +
+            '<p style="font-size:14px;margin-top:8px;">' + error.message + '</p>' +
+            '</div>';
+        }
+      }
     }
 
     // ============================================
