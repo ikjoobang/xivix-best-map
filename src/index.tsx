@@ -29,7 +29,7 @@ app.use('/static/*', serveStatic())
 app.post('/api/gemini/analyze', async (c) => {
   const { prompt, model } = await c.req.json()
   const apiKey = model === 'pro' ? c.env.GEMINI_PRO_KEY : c.env.GEMINI_FLASH_KEY
-  const modelName = model === 'pro' ? 'gemini-2.5-pro-preview-05-06' : 'gemini-2.5-flash-preview-05-20'
+  const modelName = model === 'pro' ? 'gemini-2.5-pro' : 'gemini-2.5-flash'
   
   try {
     const response = await fetch(
@@ -857,7 +857,7 @@ app.get('/', (c) => {
         <div class="source-box">
           <p class="font-medium mb-1"><i class="fas fa-database mr-1"></i> 데이터 출처 및 근거</p>
           <ul class="text-gray-700 dark:text-gray-300">
-            <li>✔️ 상가 데이터: <strong>소상공인시장진흥공단 상권정보 API</strong> (실시간 조회)</li>
+            <li>✔️ 상가 데이터: <strong>네이버 지역검색 API</strong> (실시간 조회)</li>
             <li>✔️ 위치 정보: <strong>T-MAP API</strong> (SK텔레콤)</li>
             <li>✔️ 지도 표시: <strong>네이버 지도 API</strong></li>
             <li>✔️ AI 분석: <strong>Google Gemini 2.5 Pro/Flash</strong></li>
@@ -927,7 +927,7 @@ app.get('/', (c) => {
         <ul class="text-sm space-y-1 text-gray-800 dark:text-gray-200">
           <li>■ 본 분석 결과는 <strong>참고용</strong>이며, 실제 창업 결정에 대한 법적 책임을 지지 않습니다.</li>
           <li>■ AI 분석은 <strong>공개 데이터 기반 추정치</strong>이며, 실제 상황과 다를 수 있습니다.</li>
-          <li>■ 상권 데이터는 <strong>소상공인시장진흥공단</strong> 제공 데이터로, 실시간 현황과 차이가 있을 수 있습니다.</li>
+          <li>■ 상권 데이터는 <strong>네이버 지역검색 API</strong> 기반으로, 실제 상권 현황과 차이가 있을 수 있습니다.</li>
           <li>■ 창업 전 반드시 <strong>현장 조사</strong> 및 <strong>전문가 상담</strong>을 권장합니다.</li>
           <li>■ 매출 예측, 임대료 정보 등은 포함되어 있지 않으며, <strong>별도 확인이 필요</strong>합니다.</li>
           <li>■ 본 서비스 이용으로 인한 어떠한 손해에 대해서도 XIΛIX는 책임을 지지 않습니다.</li>
@@ -1609,7 +1609,7 @@ app.get('/', (c) => {
       document.getElementById('resultSection').classList.add('hidden');
 
       try {
-        updateLoading('주변 상권 데이터를 수집하고 있습니다...', '소상공인시장진흥공단 API 연동 중');
+        updateLoading('주변 상권 데이터를 수집하고 있습니다...', '네이버 지역검색 API 연동 중');
         
         const storeData = await fetchStoreData();
         
@@ -1747,7 +1747,7 @@ app.get('/', (c) => {
 - 분석 반경: \${result.radius}m
 - 희망 업종: \${result.category}
 
-## 상권 현황 데이터 (소상공인시장진흥공단 제공)
+## 상권 현황 데이터 (네이버 지역검색 API 기반)
 - 총 상가 수: \${result.totalCount}개
 - 동종 업종 수: \${result.sameCategoryCount}개
 - 상가 밀도: \${result.density}개/km²
