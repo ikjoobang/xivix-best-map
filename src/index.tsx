@@ -398,7 +398,10 @@ app.get('/api/naver/local', async (c) => {
 })
 
 // ============================================
-// 🔥 다중 API 통합 상권분석 (Multi-API Analysis)
+// 🔥 다중 API 통합 상권분석 v2.0 (고도화 버전)
+// - 거리별 분석 (100m/300m/500m/1km)
+// - 리뷰/평점 기반 경쟁력 순위
+// - 3개 API 교차검증 강화
 // ============================================
 app.get('/api/analysis/multi', async (c) => {
   const cx = c.req.query('cx')  // 경도
@@ -411,24 +414,53 @@ app.get('/api/analysis/multi', async (c) => {
     return c.json({ error: 'cx(경도)와 cy(위도)는 필수입니다' }, 400)
   }
   
-  const radiusKm = parseInt(radius) / 1000  // km 단위로 변환
+  const radiusNum = parseInt(radius)
+  const radiusKm = radiusNum / 1000
   const results: any = {
     meta: {
       coordinates: { lon: parseFloat(cx), lat: parseFloat(cy) },
-      radius: parseInt(radius),
+      radius: radiusNum,
       radiusKm,
       category,
       address,
       analyzedAt: new Date().toISOString(),
+      version: '2.0'  // 고도화 버전
     },
     sources: {},
     summary: {},
     competitors: [],
     categoryBreakdown: {},
+    // 🔥 NEW: 거리별 분석
+    distanceAnalysis: {
+      '100m': { count: 0, items: [], density: 0 },
+      '300m': { count: 0, items: [], density: 0 },
+      '500m': { count: 0, items: [], density: 0 },
+      '1km': { count: 0, items: [], density: 0 }
+    },
+    // 🔥 NEW: 경쟁력 순위 TOP 10
+    competitorRanking: [],
+    // 🔥 NEW: 교차검증 상세
+    crossVerification: {
+      tripleVerified: [],  // 3개 API 모두 확인
+      doubleVerified: [],  // 2개 API 확인
+      singleSource: []     // 1개 API만
+    }
   }
   
   // 지역명 추출 (주소에서)
   const locationKeyword = address.split(' ').slice(0, 3).join(' ') || '해당 지역'
+  
+  // 거리 계산 함수 (Haversine)
+  const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+    const R = 6371000 // 지구 반경 (미터)
+    const dLat = (lat2 - lat1) * Math.PI / 180
+    const dLon = (lon2 - lon1) * Math.PI / 180
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLon/2) * Math.sin(dLon/2)
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
+    return R * c
+  }
   
   // ===== 1. 카카오 로컬 API (좌표+반경 검색) =====
   try {
@@ -452,7 +484,7 @@ app.get('/api/analysis/multi', async (c) => {
       results.sources.kakao = {
         totalCount: meta.total_count || 0,
         returnedCount: docs.length,
-        isAccurate: !meta.is_end,  // 더 많은 결과가 있는지
+        isAccurate: !meta.is_end,
         items: docs.map((d: any) => ({
           name: d.place_name,
           category: d.category_name,
@@ -462,6 +494,7 @@ app.get('/api/analysis/multi', async (c) => {
           lon: parseFloat(d.x),
           lat: parseFloat(d.y),
           placeUrl: d.place_url,
+          source: 'kakao'
         }))
       }
     }
@@ -493,15 +526,21 @@ app.get('/api/analysis/multi', async (c) => {
       results.sources.tmap = {
         totalCount: poiInfo.totalCount || 0,
         returnedCount: pois.length,
-        items: pois.map((p: any) => ({
-          name: p.name,
-          address: p.roadName ? `${p.upperAddrName} ${p.middleAddrName} ${p.roadName} ${p.buildingNo1}` : 
-                   `${p.upperAddrName} ${p.middleAddrName} ${p.lowerAddrName}`,
-          phone: p.telNo,
-          distance: parseFloat(p.radius) * 1000,  // km to m
-          lon: parseFloat(p.frontLon),
-          lat: parseFloat(p.frontLat),
-        }))
+        items: pois.map((p: any) => {
+          const itemLat = parseFloat(p.frontLat)
+          const itemLon = parseFloat(p.frontLon)
+          const dist = calculateDistance(parseFloat(cy), parseFloat(cx), itemLat, itemLon)
+          return {
+            name: p.name,
+            address: p.roadName ? `${p.upperAddrName} ${p.middleAddrName} ${p.roadName} ${p.buildingNo1}` : 
+                     `${p.upperAddrName} ${p.middleAddrName} ${p.lowerAddrName}`,
+            phone: p.telNo,
+            distance: Math.round(dist),
+            lon: itemLon,
+            lat: itemLat,
+            source: 'tmap'
+          }
+        })
       }
     }
   } catch (error: any) {
@@ -509,7 +548,7 @@ app.get('/api/analysis/multi', async (c) => {
     results.sources.tmap = { error: error.message }
   }
   
-  // ===== 3. 네이버 지역검색 API (키워드 검색) =====
+  // ===== 3. 네이버 지역검색 API (키워드 검색 + 리뷰수 정렬) =====
   try {
     const naverQuery = `${locationKeyword} ${category}`
     const naverUrl = `https://openapi.naver.com/v1/search/local.json?query=${encodeURIComponent(naverQuery)}&display=15&sort=comment`
@@ -529,14 +568,26 @@ app.get('/api/analysis/multi', async (c) => {
         totalCount: naverData.total || 0,
         returnedCount: items.length,
         searchQuery: naverQuery,
-        items: items.map((item: any) => ({
-          name: item.title.replace(/<[^>]*>/g, ''),  // HTML 태그 제거
-          category: item.category,
-          address: item.roadAddress || item.address,
-          phone: item.telephone,
-          lon: item.mapx ? parseInt(item.mapx) / 10000000 : null,
-          lat: item.mapy ? parseInt(item.mapy) / 10000000 : null,
-        }))
+        items: items.map((item: any) => {
+          const itemLon = item.mapx ? parseInt(item.mapx) / 10000000 : null
+          const itemLat = item.mapy ? parseInt(item.mapy) / 10000000 : null
+          let dist = null
+          if (itemLat && itemLon) {
+            dist = Math.round(calculateDistance(parseFloat(cy), parseFloat(cx), itemLat, itemLon))
+          }
+          return {
+            name: item.title.replace(/<[^>]*>/g, ''),
+            category: item.category,
+            address: item.roadAddress || item.address,
+            phone: item.telephone,
+            lon: itemLon,
+            lat: itemLat,
+            distance: dist,
+            // 🔥 네이버 링크에서 리뷰 정보 추정 (정렬이 comment 기준이므로 상위일수록 리뷰 많음)
+            estimatedPopularity: items.indexOf(item) + 1,  // 순위 (1이 가장 인기)
+            source: 'naver'
+          }
+        })
       }
     }
   } catch (error: any) {
@@ -558,11 +609,9 @@ app.get('/api/analysis/multi', async (c) => {
         const totalCount = semasData.body?.totalCount || 0
         const dataDate = semasData.header?.stdrYm || ''
         
-        // 업종별 분류
         const categoryCount: Record<string, number> = {}
         const targetItems: any[] = []
         
-        // 동종 업종 코드 매핑
         const categoryCodeMap: Record<string, string[]> = {
           '미용실': ['S207'],
           '음식점': ['I201', 'I202', 'I203', 'I204', 'I205', 'I206', 'I210'],
@@ -580,18 +629,19 @@ app.get('/api/analysis/multi', async (c) => {
         items.forEach((item: any) => {
           const mclsCd = item.indsMclsCd || ''
           const mclsNm = item.indsMclsNm || '기타'
-          
-          // 업종별 카운트
           categoryCount[mclsNm] = (categoryCount[mclsNm] || 0) + 1
           
-          // 동종 업종 필터
           if (targetCodes.includes(mclsCd)) {
+            const itemLat = parseFloat(item.lat)
+            const itemLon = parseFloat(item.lon)
+            const dist = calculateDistance(parseFloat(cy), parseFloat(cx), itemLat, itemLon)
             targetItems.push({
               name: item.bizesNm,
               category: item.indsSclsNm || mclsNm,
               address: item.rdnmAdr || item.lnoAdr,
-              lon: parseFloat(item.lon),
-              lat: parseFloat(item.lat),
+              lon: itemLon,
+              lat: itemLat,
+              distance: Math.round(dist),
               source: 'semas'
             })
           }
@@ -603,10 +653,9 @@ app.get('/api/analysis/multi', async (c) => {
           dataDate,
           dataSource: '소상공인시장진흥공단 공식 통계',
           categoryBreakdown: categoryCount,
-          items: targetItems.slice(0, 30)  // 상위 30개만
+          items: targetItems.slice(0, 50)
         }
         
-        // 전체 업종 분포 저장
         results.categoryBreakdown = categoryCount
       }
     }
@@ -615,24 +664,47 @@ app.get('/api/analysis/multi', async (c) => {
     results.sources.semas = { error: error.message }
   }
   
-  // ===== 데이터 통합 및 교차 검증 =====
+  // ===== 🔥 데이터 통합 및 교차 검증 (강화) =====
   const allCompetitors: Map<string, any> = new Map()
   
-  // 각 소스에서 경쟁업체 수집 및 중복 제거
+  // 이름 정규화 함수 (더 정확한 매칭)
+  const normalizeName = (name: string): string => {
+    return name.toLowerCase()
+      .replace(/[^\w가-힣]/g, '')  // 특수문자 제거
+      .replace(/점$/, '')  // '점' 제거
+      .replace(/호점$/, '')  // '호점' 제거
+      .replace(/지점$/, '')  // '지점' 제거
+  }
+  
   const addCompetitors = (source: string, items: any[]) => {
     items.forEach(item => {
-      const key = `${item.name}_${item.address}`.toLowerCase().replace(/\s/g, '')
+      if (!item.name) return
+      
+      // 더 정확한 키 생성 (이름 정규화 + 주소 일부)
+      const normalizedName = normalizeName(item.name)
+      const addressPart = (item.address || '').replace(/\s/g, '').slice(0, 20)
+      const key = `${normalizedName}_${addressPart}`
+      
       if (!allCompetitors.has(key)) {
-        allCompetitors.set(key, { ...item, sources: [source] })
+        allCompetitors.set(key, { 
+          ...item, 
+          sources: [source],
+          verificationScore: 1,  // 검증 점수
+          popularityScore: item.estimatedPopularity ? (16 - item.estimatedPopularity) : 0  // 인기도 점수 (네이버 기준)
+        })
       } else {
         const existing = allCompetitors.get(key)
         if (!existing.sources.includes(source)) {
           existing.sources.push(source)
+          existing.verificationScore = existing.sources.length  // 검증 점수 업데이트
         }
         // 추가 정보 병합
         if (item.phone && !existing.phone) existing.phone = item.phone
-        if (item.distance && !existing.distance) existing.distance = item.distance
+        if (item.distance && (!existing.distance || item.distance < existing.distance)) existing.distance = item.distance
         if (item.placeUrl && !existing.placeUrl) existing.placeUrl = item.placeUrl
+        if (item.estimatedPopularity && existing.popularityScore < (16 - item.estimatedPopularity)) {
+          existing.popularityScore = 16 - item.estimatedPopularity
+        }
       }
     })
   }
@@ -642,29 +714,81 @@ app.get('/api/analysis/multi', async (c) => {
   if (results.sources.naver?.items) addCompetitors('naver', results.sources.naver.items)
   if (results.sources.semas?.items) addCompetitors('semas', results.sources.semas.items)
   
-  // 경쟁업체 리스트 (여러 소스에서 확인된 업체 우선)
+  // 전체 경쟁업체 리스트 정렬
   results.competitors = Array.from(allCompetitors.values())
     .sort((a, b) => {
-      // 1. 다중 소스 확인된 업체 우선
-      if (b.sources.length !== a.sources.length) return b.sources.length - a.sources.length
-      // 2. 거리순
+      // 1. 검증 점수 (다중 소스 확인)
+      if (b.verificationScore !== a.verificationScore) return b.verificationScore - a.verificationScore
+      // 2. 인기도 점수
+      if (b.popularityScore !== a.popularityScore) return b.popularityScore - a.popularityScore
+      // 3. 거리순
       return (a.distance || 9999) - (b.distance || 9999)
     })
+  
+  // 🔥 거리별 분석
+  const distanceThresholds = [
+    { key: '100m', max: 100 },
+    { key: '300m', max: 300 },
+    { key: '500m', max: 500 },
+    { key: '1km', max: 1000 }
+  ]
+  
+  distanceThresholds.forEach(({ key, max }) => {
+    const itemsInRange = results.competitors.filter((c: any) => c.distance && c.distance <= max)
+    const areaKm2 = Math.PI * Math.pow(max / 1000, 2)
+    results.distanceAnalysis[key] = {
+      count: itemsInRange.length,
+      density: Math.round((itemsInRange.length / areaKm2) * 10) / 10,
+      items: itemsInRange.slice(0, 10),
+      riskLevel: itemsInRange.length === 0 ? '블루오션' :
+                 itemsInRange.length <= 3 ? '낮음' :
+                 itemsInRange.length <= 7 ? '보통' :
+                 itemsInRange.length <= 15 ? '높음' : '매우 높음'
+    }
+  })
+  
+  // 🔥 교차검증 분류
+  results.crossVerification.tripleVerified = results.competitors.filter((c: any) => c.sources.length >= 3)
+  results.crossVerification.doubleVerified = results.competitors.filter((c: any) => c.sources.length === 2)
+  results.crossVerification.singleSource = results.competitors.filter((c: any) => c.sources.length === 1)
+  
+  // 🔥 경쟁력 순위 TOP 10 (종합 점수 기반)
+  results.competitorRanking = results.competitors
+    .map((c: any, idx: number) => ({
+      rank: idx + 1,
+      name: c.name,
+      address: c.address,
+      distance: c.distance,
+      sources: c.sources,
+      verificationScore: c.verificationScore,
+      popularityScore: c.popularityScore,
+      totalScore: (c.verificationScore * 30) + (c.popularityScore * 5) + (c.distance ? Math.max(0, 20 - c.distance / 50) : 0),
+      threat: c.verificationScore >= 3 ? '🔴 강력 경쟁자' :
+              c.verificationScore >= 2 ? '🟠 주의 경쟁자' :
+              c.popularityScore >= 10 ? '🟡 인기 업체' : '🟢 일반 업체'
+    }))
+    .sort((a: any, b: any) => b.totalScore - a.totalScore)
+    .slice(0, 10)
   
   // ===== 요약 통계 생성 =====
   const kakaoCount = results.sources.kakao?.totalCount || 0
   const tmapCount = results.sources.tmap?.totalCount || 0
   const semasCount = results.sources.semas?.targetCategoryCount || 0
+  const naverCount = results.sources.naver?.totalCount || 0
   
-  // 추정치 계산 (가중 평균)
-  const estimatedCount = Math.round(
-    (kakaoCount * 0.4) + (tmapCount * 0.3) + (semasCount * 0.3)
+  // 추정치 계산 (가중 평균 + 교차검증 보정)
+  const crossVerifiedCount = results.crossVerification.tripleVerified.length + 
+                             results.crossVerification.doubleVerified.length
+  const estimatedCount = Math.max(
+    Math.round((kakaoCount * 0.35) + (tmapCount * 0.25) + (semasCount * 0.25) + (naverCount * 0.15)),
+    crossVerifiedCount  // 최소한 교차검증된 수 이상
   )
   
-  const areaKm2 = Math.PI * Math.pow(parseInt(radius) / 1000, 2)
+  const areaKm2 = Math.PI * Math.pow(radiusNum / 1000, 2)
   const density = estimatedCount / areaKm2
   
-  // 위험도 평가
+  // 위험도 평가 (거리별 분석 반영)
+  const nearbyCount = results.distanceAnalysis['300m'].count
   let riskLevel = ''
   let riskColor = ''
   let riskDescription = ''
@@ -673,23 +797,32 @@ app.get('/api/analysis/multi', async (c) => {
     riskLevel = '블루오션'
     riskColor = 'blue'
     riskDescription = '경쟁업체가 거의 없는 미개척 시장'
-  } else if (estimatedCount <= 10) {
+  } else if (nearbyCount === 0 && estimatedCount <= 5) {
+    riskLevel = '매우 낮음'
+    riskColor = 'blue'
+    riskDescription = `300m 내 경쟁업체 없음, 전체 ${estimatedCount}개`
+  } else if (nearbyCount <= 2 && estimatedCount <= 15) {
     riskLevel = '낮음'
     riskColor = 'green'
-    riskDescription = `경쟁업체 ${estimatedCount}개 - 진입 용이`
-  } else if (estimatedCount <= 30) {
+    riskDescription = `300m 내 ${nearbyCount}개, 전체 ${estimatedCount}개 - 진입 용이`
+  } else if (nearbyCount <= 5 && estimatedCount <= 30) {
     riskLevel = '보통'
     riskColor = 'yellow'
-    riskDescription = `경쟁업체 ${estimatedCount}개 - 차별화 필요`
-  } else if (estimatedCount <= 70) {
+    riskDescription = `300m 내 ${nearbyCount}개, 전체 ${estimatedCount}개 - 차별화 필요`
+  } else if (nearbyCount <= 10 && estimatedCount <= 50) {
     riskLevel = '높음'
     riskColor = 'orange'
-    riskDescription = `경쟁업체 ${estimatedCount}개 - 치열한 경쟁`
+    riskDescription = `300m 내 ${nearbyCount}개, 전체 ${estimatedCount}개 - 치열한 경쟁`
   } else {
     riskLevel = '매우 높음'
     riskColor = 'red'
-    riskDescription = `경쟁업체 ${estimatedCount}개 - 레드오션`
+    riskDescription = `300m 내 ${nearbyCount}개, 전체 ${estimatedCount}개 - 레드오션`
   }
+  
+  // 신뢰도 계산 (교차검증 비율 기반)
+  const totalCompetitors = results.competitors.length
+  const verifiedRatio = totalCompetitors > 0 ? crossVerifiedCount / totalCompetitors : 0
+  const reliability = verifiedRatio >= 0.3 ? '높음' : verifiedRatio >= 0.15 ? '보통' : '낮음'
   
   results.summary = {
     estimatedCompetitors: estimatedCount,
@@ -702,10 +835,27 @@ app.get('/api/analysis/multi', async (c) => {
     dataComparison: {
       kakao: kakaoCount,
       tmap: tmapCount,
+      naver: naverCount,
       semas: semasCount,
-      crossVerified: results.competitors.filter((c: any) => c.sources.length > 1).length
+      crossVerified: crossVerifiedCount,
+      tripleVerified: results.crossVerification.tripleVerified.length,
+      doubleVerified: results.crossVerification.doubleVerified.length
     },
-    reliability: results.competitors.filter((c: any) => c.sources.length > 1).length > 5 ? '높음' : '보통'
+    reliability,
+    verifiedRatio: Math.round(verifiedRatio * 100),
+    // 🔥 거리별 요약
+    nearbyAnalysis: {
+      within100m: results.distanceAnalysis['100m'].count,
+      within300m: results.distanceAnalysis['300m'].count,
+      within500m: results.distanceAnalysis['500m'].count,
+      within1km: results.distanceAnalysis['1km'].count
+    },
+    // 🔥 주요 경쟁 위협
+    topThreats: results.competitorRanking.slice(0, 3).map((r: any) => ({
+      name: r.name,
+      distance: r.distance,
+      threat: r.threat
+    }))
   }
   
   return c.json(results)
@@ -1270,14 +1420,54 @@ app.get('/', (c) => {
 
         <!-- 데이터 출처 표시 -->
         <div class="source-box">
-          <p class="font-medium mb-1"><i class="fas fa-database mr-1"></i> 데이터 출처 및 근거</p>
+          <p class="font-medium mb-1"><i class="fas fa-database mr-1"></i> 데이터 출처 및 근거 (v2.0 고도화)</p>
           <ul class="text-gray-700 dark:text-gray-300">
-            <li>✔️ 상가 데이터: <strong>네이버 지역검색 API</strong> (실시간 조회)</li>
-            <li>✔️ 위치 정보: <strong>T-MAP API</strong> (SK텔레콤)</li>
-            <li>✔️ 지도 표시: <strong>네이버 지도 API</strong></li>
-            <li>✔️ AI 분석: <strong>Google Gemini 2.5 Pro/Flash</strong></li>
+            <li>✔️ <strong>카카오 로컬 API</strong> - 업소 위치/거리/카테고리</li>
+            <li>✔️ <strong>T-MAP POI API</strong> - 정확한 POI 데이터</li>
+            <li>✔️ <strong>네이버 검색 API</strong> - 인기도/리뷰 기반 정렬</li>
+            <li>✔️ <strong>소상공인 API</strong> - 공식 통계 데이터</li>
+            <li>✔️ <strong>AI 분석</strong>: Gemini 2.5 Pro + Flash 듀얼</li>
             <li>✔️ 분석 시점: <span id="analysisTime">-</span></li>
           </ul>
+        </div>
+      </div>
+      
+      <!-- 🔥 NEW: 거리별 경쟁 분석 -->
+      <div class="mb-8 fade-in">
+        <h2 class="text-2xl font-bold mb-4 dark:text-white">
+          <i class="fas fa-bullseye primary-green mr-2"></i> 거리별 경쟁 현황
+        </h2>
+        <div class="analysis-card">
+          <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
+            ■ 선택한 위치 기준 <strong>100m ~ 1km</strong> 반경별 동종 업종 경쟁업체 수
+          </p>
+          <div id="distanceAnalysis" class="grid grid-cols-2 md:grid-cols-4 gap-4"></div>
+        </div>
+      </div>
+      
+      <!-- 🔥 NEW: 교차검증 신뢰도 -->
+      <div class="mb-8 fade-in">
+        <h2 class="text-2xl font-bold mb-4 dark:text-white">
+          <i class="fas fa-shield-check primary-green mr-2"></i> 데이터 교차검증 (신뢰도)
+        </h2>
+        <div class="analysis-card">
+          <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
+            ■ 여러 API에서 동시에 확인된 업체일수록 <strong>실제 존재 가능성이 높음</strong>
+          </p>
+          <div id="crossVerificationInfo"></div>
+        </div>
+      </div>
+      
+      <!-- 🔥 NEW: 경쟁력 순위 TOP 10 -->
+      <div class="mb-8 fade-in">
+        <h2 class="text-2xl font-bold mb-4 dark:text-white">
+          <i class="fas fa-trophy primary-green mr-2"></i> 주요 경쟁업체 TOP 10
+        </h2>
+        <div class="analysis-card">
+          <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
+            ■ 다중 API 검증 + 인기도 + 거리 기반 <strong>종합 경쟁 위협도</strong> 순위
+          </p>
+          <div id="competitorRanking"></div>
         </div>
       </div>
 
@@ -2080,14 +2270,18 @@ app.get('/', (c) => {
     }
 
     function analyzeStoreData(data) {
-      // 🔥 다중 API 통합 분석 결과 처리
+      // 🔥 다중 API 통합 분석 결과 처리 v2.0
       const summary = data.summary || {};
       const sources = data.sources || {};
       const meta = data.meta || {};
       const competitors = data.competitors || [];
       const categoryBreakdown = data.categoryBreakdown || {};
       
-      // 추정 경쟁업체 수 (카카오, T-MAP, 소상공인 가중 평균)
+      // 🔥 NEW: 고도화된 분석 데이터
+      const distanceAnalysis = data.distanceAnalysis || {};
+      const competitorRanking = data.competitorRanking || [];
+      const crossVerification = data.crossVerification || {};
+      
       const sameCategoryCount = summary.estimatedCompetitors || 0;
       const totalCount = summary.totalStores || 
         (sources.semas?.totalCount || 0) || 
@@ -2097,10 +2291,10 @@ app.get('/', (c) => {
       const density = summary.density || (sameCategoryCount / areaKm2).toFixed(1);
       const competitorDensity = (sameCategoryCount / areaKm2).toFixed(1);
       
-      // 서버에서 계산한 위험도 사용
       const riskLevel = summary.riskLevel || '보통';
       const riskColor = {
         '블루오션': 'text-blue-600',
+        '매우 낮음': 'text-blue-500',
         '낮음': 'text-green-600',
         '보통': 'text-yellow-600',
         '높음': 'text-orange-600',
@@ -2108,7 +2302,6 @@ app.get('/', (c) => {
       }[riskLevel] || 'text-yellow-600';
       const riskDescription = summary.riskDescription || '';
       
-      // 업종별 카운트 (소상공인 API에서 가져온 데이터)
       let categoryCount = {};
       if (Object.keys(categoryBreakdown).length > 0) {
         Object.entries(categoryBreakdown).forEach(([name, count]) => {
@@ -2116,9 +2309,8 @@ app.get('/', (c) => {
         });
       }
       
-      // 데이터 소스 정보
       const dataComparison = summary.dataComparison || {};
-      const dataSourceInfo = \`카카오(\${dataComparison.kakao || 0}개) + T-MAP(\${dataComparison.tmap || 0}개) + 교차검증(\${dataComparison.crossVerified || 0}개)\`;
+      const dataSourceInfo = \`카카오(\${dataComparison.kakao || 0}) + T-MAP(\${dataComparison.tmap || 0}) + 네이버(\${dataComparison.naver || 0}) + 소상공인(\${dataComparison.semas || 0}) | 교차검증: \${dataComparison.crossVerified || 0}개\`;
       
       return {
         totalCount,
@@ -2129,18 +2321,25 @@ app.get('/', (c) => {
         riskColor,
         riskDescription,
         categoryCount,
-        items: competitors,  // 통합 경쟁업체 목록
+        items: competitors,
         competitorList: competitors,
-        dataDate: new Date().toISOString().split('T')[0].replace(/-/g, ''),  // 2026년 1월
-        dataSource: 'multi_api_analysis',
+        dataDate: new Date().toISOString().split('T')[0].replace(/-/g, ''),
+        dataSource: 'multi_api_analysis_v2',
         dataSourceInfo,
         dataSources: sources,
         dataComparison,
         reliability: summary.reliability || '보통',
+        verifiedRatio: summary.verifiedRatio || 0,
         address: selectedAddress || meta.address,
         radius: selectedRadius,
         category: selectedCategoryName || meta.category,
-        searchLocation: meta.address
+        searchLocation: meta.address,
+        // 🔥 NEW: 고도화 데이터
+        distanceAnalysis,
+        competitorRanking,
+        crossVerification,
+        nearbyAnalysis: summary.nearbyAnalysis || {},
+        topThreats: summary.topThreats || []
       };
     }
 
@@ -2153,6 +2352,16 @@ app.get('/', (c) => {
       riskEl.textContent = result.riskLevel;
       riskEl.className = 'text-3xl font-bold ' + result.riskColor;
       
+      // 🔥 거리별 분석 표시
+      displayDistanceAnalysis(result.distanceAnalysis, result.nearbyAnalysis);
+      
+      // 🔥 경쟁력 순위 TOP 10 표시
+      displayCompetitorRanking(result.competitorRanking);
+      
+      // 🔥 교차검증 정보 표시
+      displayCrossVerification(result.crossVerification, result.dataComparison);
+      
+      // 업종별 현황
       const breakdown = document.getElementById('categoryBreakdown');
       breakdown.innerHTML = '';
       
@@ -2176,77 +2385,200 @@ app.get('/', (c) => {
         breakdown.appendChild(item);
       });
     }
+    
+    // 🔥 거리별 분석 표시 함수
+    function displayDistanceAnalysis(distanceAnalysis, nearbyAnalysis) {
+      const container = document.getElementById('distanceAnalysis');
+      if (!container) return;
+      
+      container.innerHTML = '';
+      
+      const distances = ['100m', '300m', '500m', '1km'];
+      const colors = {
+        '블루오션': 'bg-blue-100 text-blue-800 border-blue-300',
+        '매우 낮음': 'bg-blue-50 text-blue-700 border-blue-200',
+        '낮음': 'bg-green-100 text-green-800 border-green-300',
+        '보통': 'bg-yellow-100 text-yellow-800 border-yellow-300',
+        '높음': 'bg-orange-100 text-orange-800 border-orange-300',
+        '매우 높음': 'bg-red-100 text-red-800 border-red-300'
+      };
+      
+      distances.forEach(dist => {
+        const data = distanceAnalysis[dist] || { count: 0, density: 0, riskLevel: '보통' };
+        const colorClass = colors[data.riskLevel] || colors['보통'];
+        
+        const item = document.createElement('div');
+        item.className = \`p-4 rounded-lg border-2 \${colorClass}\`;
+        item.innerHTML = \`
+          <div class="text-center">
+            <p class="text-2xl font-bold">\${data.count}</p>
+            <p class="text-sm font-medium">\${dist} 내</p>
+            <p class="text-xs mt-1">\${data.density}/km²</p>
+            <span class="inline-block mt-2 px-2 py-1 rounded text-xs font-medium">\${data.riskLevel}</span>
+          </div>
+        \`;
+        container.appendChild(item);
+      });
+    }
+    
+    // 🔥 경쟁력 순위 표시 함수
+    function displayCompetitorRanking(ranking) {
+      const container = document.getElementById('competitorRanking');
+      if (!container) return;
+      
+      container.innerHTML = '';
+      
+      if (!ranking || ranking.length === 0) {
+        container.innerHTML = '<p class="text-gray-500 text-center py-4">경쟁업체 데이터가 없습니다</p>';
+        return;
+      }
+      
+      ranking.slice(0, 10).forEach((comp, idx) => {
+        const item = document.createElement('div');
+        item.className = 'flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg mb-2';
+        item.innerHTML = \`
+          <div class="flex items-center gap-3">
+            <span class="w-8 h-8 flex items-center justify-center rounded-full \${idx < 3 ? 'bg-yellow-400 text-black' : 'bg-gray-300 dark:bg-gray-600 text-gray-700 dark:text-gray-300'} font-bold text-sm">\${idx + 1}</span>
+            <div>
+              <p class="font-medium dark:text-white">\${comp.name}</p>
+              <p class="text-xs text-gray-500 dark:text-gray-400">\${comp.distance ? comp.distance + 'm' : '-'} | 출처: \${comp.sources?.join('+') || '-'}</p>
+            </div>
+          </div>
+          <span class="text-sm px-2 py-1 rounded \${comp.threat.includes('🔴') ? 'bg-red-100 text-red-800' : comp.threat.includes('🟠') ? 'bg-orange-100 text-orange-800' : comp.threat.includes('🟡') ? 'bg-yellow-100 text-yellow-800' : 'bg-gray-100 text-gray-600'}">\${comp.threat}</span>
+        \`;
+        container.appendChild(item);
+      });
+    }
+    
+    // 🔥 교차검증 정보 표시 함수
+    function displayCrossVerification(crossVerification, dataComparison) {
+      const container = document.getElementById('crossVerificationInfo');
+      if (!container) return;
+      
+      const triple = crossVerification?.tripleVerified?.length || 0;
+      const double = crossVerification?.doubleVerified?.length || 0;
+      const single = crossVerification?.singleSource?.length || 0;
+      const total = triple + double + single;
+      
+      container.innerHTML = \`
+        <div class="grid grid-cols-3 gap-4 text-center">
+          <div class="p-3 bg-green-100 dark:bg-green-900/30 rounded-lg">
+            <p class="text-2xl font-bold text-green-700 dark:text-green-400">\${triple}</p>
+            <p class="text-xs text-green-600 dark:text-green-500">3개+ API 검증</p>
+            <p class="text-xs text-gray-500">신뢰도 최고</p>
+          </div>
+          <div class="p-3 bg-yellow-100 dark:bg-yellow-900/30 rounded-lg">
+            <p class="text-2xl font-bold text-yellow-700 dark:text-yellow-400">\${double}</p>
+            <p class="text-xs text-yellow-600 dark:text-yellow-500">2개 API 검증</p>
+            <p class="text-xs text-gray-500">신뢰도 높음</p>
+          </div>
+          <div class="p-3 bg-gray-100 dark:bg-gray-700 rounded-lg">
+            <p class="text-2xl font-bold text-gray-600 dark:text-gray-300">\${single}</p>
+            <p class="text-xs text-gray-500 dark:text-gray-400">1개 API 확인</p>
+            <p class="text-xs text-gray-500">참고용</p>
+          </div>
+        </div>
+        <p class="text-xs text-gray-500 dark:text-gray-400 mt-3 text-center">
+          총 \${total}개 업체 중 \${triple + double}개(\${total > 0 ? Math.round((triple + double) / total * 100) : 0}%)가 다중 API에서 확인됨
+        </p>
+      \`;
+    }
 
     async function performAIAnalysis(result) {
-      // 🔥 다중 API 경쟁업체 목록 (교차 검증된 업체 우선, 최대 15개)
-      const crossVerifiedCompetitors = result.competitorList?.filter(c => c.sources?.length > 1) || [];
-      const singleSourceCompetitors = result.competitorList?.filter(c => c.sources?.length === 1) || [];
-      const topCompetitors = [...crossVerifiedCompetitors, ...singleSourceCompetitors].slice(0, 15);
+      // 🔥 v2.0: 거리별 분석 데이터
+      const distanceAnalysis = result.distanceAnalysis || {};
+      const dist100m = distanceAnalysis['100m']?.count || 0;
+      const dist300m = distanceAnalysis['300m']?.count || 0;
+      const dist500m = distanceAnalysis['500m']?.count || 0;
+      const dist1km = distanceAnalysis['1km']?.count || 0;
       
-      const competitorSample = topCompetitors.map(c => {
-        const sources = c.sources?.join('+') || 'unknown';
-        const distance = c.distance ? \` [\${c.distance}m]\` : '';
-        return \`- \${c.name}\${distance} (\${c.address}) [출처: \${sources}]\`;
-      }).join('\\n') || '정보 없음';
+      // 🔥 v2.0: 교차검증 데이터
+      const crossVerification = result.crossVerification || {};
+      const tripleVerified = crossVerification.tripleVerified?.length || 0;
+      const doubleVerified = crossVerification.doubleVerified?.length || 0;
+      
+      // 🔥 v2.0: 경쟁력 순위 TOP 5
+      const topThreats = (result.competitorRanking || []).slice(0, 5);
+      const threatList = topThreats.map((c, i) => 
+        \`\${i+1}. \${c.name} (\${c.distance || '?'}m) - \${c.threat} [검증: \${c.sources?.join('+')}]\`
+      ).join('\\n') || '정보 없음';
       
       // 데이터 소스 비교 정보
       const dataComparison = result.dataComparison || {};
-      const sourceInfo = \`카카오(\${dataComparison.kakao || 0}개), T-MAP(\${dataComparison.tmap || 0}개), 교차검증(\${dataComparison.crossVerified || 0}개)\`;
+      const sourceInfo = \`카카오(\${dataComparison.kakao || 0}), T-MAP(\${dataComparison.tmap || 0}), 네이버(\${dataComparison.naver || 0}), 소상공인(\${dataComparison.semas || 0})\`;
       
       const prompt = \`
 당신은 10년 경력의 상권분석 전문 컨설턴트입니다. 아래 **다중 API 실시간 데이터(2026년 1월 기준)**를 기반으로 창업 희망자에게 정확하고 실용적인 분석 리포트를 작성해주세요.
 
 ## 🎯 분석 대상 정보
 - **위치**: \${result.address}
-- **검색 지역**: \${result.searchLocation || result.address}
 - **분석 반경**: \${result.radius}m (면적: 약 \${(Math.PI * Math.pow(result.radius/1000, 2)).toFixed(2)}km²)
 - **희망 창업 업종**: \${result.category}
 
-## 📊 상권 현황 데이터 (🔥 다중 API 교차 검증, 데이터 기준: 2026년 1월)
-- **데이터 소스**: \${sourceInfo}
-- **추정 경쟁업체 수**: \${result.sameCategoryCount}개 (카카오+T-MAP+소상공인 가중 평균)
+## 📊 상권 현황 데이터 (🔥 v2.0 고도화, 데이터 기준: 2026년 1월)
+- **데이터 소스 (4개 API)**: \${sourceInfo}
+- **추정 경쟁업체 수**: \${result.sameCategoryCount}개
 - **전체 상가 수**: \${result.totalCount || 'N/A'}개
 - **경쟁 밀도**: \${result.density}개/km²
-- **교차 검증된 업체**: \${dataComparison.crossVerified || 0}개 (여러 API에서 동시 확인)
 - **경쟁 위험도**: \${result.riskLevel} - \${result.riskDescription || ''}
-- **데이터 신뢰도**: \${result.reliability || '보통'}
+- **데이터 신뢰도**: \${result.reliability || '보통'} (교차검증 비율: \${result.verifiedRatio || 0}%)
 
-## 🏪 업종별 분포 현황 (소상공인 API 기준)
-\${Object.keys(result.categoryCount).length > 0 ? Object.entries(result.categoryCount).sort((a,b) => b[1].count - a[1].count).slice(0, 10).map(([name, data]) => \`- \${name}: \${data.count}개 (\${result.totalCount > 0 ? ((data.count/result.totalCount)*100).toFixed(1) : 0}%)\`).join('\\n') : '업종별 분포 데이터 없음 (카카오/T-MAP 기반 분석)'}
+## 🎯 거리별 경쟁 현황 (핵심 데이터)
+| 거리 | 경쟁업체 수 | 위험도 |
+|------|------------|--------|
+| 100m 이내 | \${dist100m}개 | \${distanceAnalysis['100m']?.riskLevel || '-'} |
+| 300m 이내 | \${dist300m}개 | \${distanceAnalysis['300m']?.riskLevel || '-'} |
+| 500m 이내 | \${dist500m}개 | \${distanceAnalysis['500m']?.riskLevel || '-'} |
+| 1km 이내 | \${dist1km}개 | \${distanceAnalysis['1km']?.riskLevel || '-'} |
 
-## 🎯 주변 동종 업종(\${result.category}) 경쟁업체 목록 (다중 API 교차 검증)
-\${competitorSample}
+## 🛡️ 데이터 교차검증 결과
+- **3개+ API에서 확인된 업체**: \${tripleVerified}개 (신뢰도 최고)
+- **2개 API에서 확인된 업체**: \${doubleVerified}개 (신뢰도 높음)
+- **총 교차검증된 업체**: \${tripleVerified + doubleVerified}개
+
+## 🏆 주요 경쟁 위협 TOP 5
+\${threatList}
+
+## 🏪 업종별 분포 현황
+\${Object.keys(result.categoryCount).length > 0 ? Object.entries(result.categoryCount).sort((a,b) => b[1].count - a[1].count).slice(0, 8).map(([name, data]) => \`- \${name}: \${data.count}개\`).join('\\n') : '데이터 없음'}
 
 ---
 
-## 📝 분석 요청사항
+## 📝 분석 요청사항 (Gemini Pro 심층 분석)
 
-다음 형식으로 **간결하고 실용적인** 분석을 작성해주세요:
+다음 형식으로 **전문적이고 실용적인** 분석을 작성해주세요:
 
-### 1. 상권 특성 요약 (3줄 이내)
-- 이 지역이 어떤 상권인지 한눈에 파악할 수 있게
+### 1. 상권 특성 요약 (3줄)
+- 이 지역의 상권 유형과 특성
 
-### 2. \${result.category} 창업 기회 분석
-- 동종 업종 \${result.sameCategoryCount}개 기준으로 시장 진입 난이도
-- 구체적 숫자와 함께 기회 요인 2~3개
+### 2. 거리별 경쟁 분석 (핵심!)
+- **100m 이내**: \${dist100m}개 → 직접 경쟁 위협 평가
+- **300m 이내**: \${dist300m}개 → 도보 접근 경쟁 평가
+- **500m~1km**: \${dist500m - dist300m}개 → 간접 경쟁 평가
+- 거리별 경쟁 강도에 따른 전략적 시사점
 
-### 3. 위험 요인 분석  
-- 경쟁업체 현황 기반 실질적 위협 요소
-- 주의해야 할 점 2~3개
+### 3. 주요 경쟁 위협 분석
+- TOP 5 경쟁업체에 대한 구체적 분석
+- 다중 API 검증된 업체(\${tripleVerified + doubleVerified}개)의 의미
 
-### 4. 차별화 전략 제안 (구체적으로)
-- 이 지역에서 성공하려면 어떤 차별화가 필요한지
-- 실행 가능한 아이디어 2~3개
+### 4. 창업 기회 vs 위험 요인
+- **기회 요인** 2~3개 (구체적 숫자 근거)
+- **위험 요인** 2~3개 (경쟁 현황 기반)
 
-### 5. 핵심 결론 (1줄)
-- 창업 추천/비추천 여부와 핵심 이유
+### 5. 차별화 전략 제안
+- 이 지역에서 성공하기 위한 구체적 전략 2~3개
+- 실행 가능한 아이디어
+
+### 6. 최종 결론 (명확하게)
+- **추천/주의/비추천** 중 하나 선택
+- 핵심 근거 1~2줄
 
 ---
 ⚠️ 중요: 
-- **환각 금지**: 제공된 데이터만 사용하세요
-- **숫자 정확히**: 동종업종 \${result.sameCategoryCount}개를 정확히 반영하세요
-- **간결하게**: 각 섹션 3~5줄 이내로 작성
-- **실용적으로**: 창업자가 바로 활용할 수 있는 정보만
+- **환각 금지**: 제공된 데이터만 사용
+- **숫자 정확히**: 거리별 데이터를 정확히 반영
+- **간결하게**: 각 섹션 4~6줄 이내
+- **전문적으로**: 상권분석 전문가 수준의 인사이트
 \`;
 
       try {
